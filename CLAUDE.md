@@ -95,6 +95,7 @@ python -m unittest discover -s tests -v   # 单元测试
 - 依赖飞书 API 的调用必须带超时、指数退避重试（429/5xx）、token 过期刷新。
 - 轮询间隔不低于 30 秒，避免触发飞书限流；监控采样 5 秒一次，不做逐秒上报。
 - 资源目标：常驻内存 < 150 MB，空闲 CPU < 1%。
+- 执行 git 提交类命令（add/commit/push）需关闭命令沙箱：沙箱默认禁止写 `.git/`，否则报 `Permission denied`（并非真实 ACL 问题）。
 
 ## 八、文档维护要求（硬性）
 
