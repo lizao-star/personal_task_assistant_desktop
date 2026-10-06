@@ -181,3 +181,78 @@ class FeishuClient:
                 page_token = payload.get("page_token")
             else:
                 break
+
+    def search_records(
+        self,
+        app_token: str,
+        table_id: str,
+        conditions: list[dict[str, Any]],
+        page_size: int = 100,
+    ) -> Iterator[dict[str, Any]]:
+        """按结构化条件搜索记录（POST search，对中文字段名友好）。
+
+        conditions 为 search 接口的 filter.conditions，例如：
+            {"field_name": "外部ID", "operator": "is", "value": ["win-xxx"]}
+            {"field_name": "修改时间", "operator": "isGreaterEqual",
+             "value": ["ExactDate", "1728000000000"]}
+        """
+        path = (
+            f"/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/search"
+        )
+        page_token: str | None = None
+
+        while True:
+            body: dict[str, Any] = {
+                "filter": {"conjunction": "and", "conditions": conditions},
+                "page_size": page_size,
+            }
+            if page_token:
+                body["page_token"] = page_token
+
+            data = self.request("POST", path, json_body=body)
+            payload = data.get("data", {})
+            for item in payload.get("items", []) or []:
+                yield item
+
+            if payload.get("has_more"):
+                page_token = payload.get("page_token")
+            else:
+                break
+
+    def get_record(
+        self, app_token: str, table_id: str, record_id: str
+    ) -> dict[str, Any]:
+        """读取单条记录，返回 {"record_id": ..., "fields": {...}}。"""
+        path = (
+            f"/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
+        )
+        data = self.request("GET", path)
+        return data.get("data", {}).get("record", {})
+
+    def create_record(
+        self, app_token: str, table_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """新建记录，返回 {"record_id": ..., "fields": {...}}。"""
+        path = (
+            f"/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records"
+        )
+        data = self.request("POST", path, json_body={"fields": fields})
+        return data.get("data", {}).get("record", {})
+
+    def update_record(
+        self,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """更新记录（只改传入的字段），返回更新后的记录。"""
+        path = (
+            f"/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
+        )
+        data = self.request("PUT", path, json_body={"fields": fields})
+        return data.get("data", {}).get("record", {})

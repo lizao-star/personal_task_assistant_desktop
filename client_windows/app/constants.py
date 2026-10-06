@@ -39,13 +39,31 @@ class TaskFields:
     REVIEW = "复盘"
     ATTACHMENT = "附件"
     URL = "链接"
+    # M2 新增字段
+    EXTERNAL_ID = "外部ID"
+    SYNC_SOURCE = "同步来源"
+    UPDATED_AT = "修改时间"
 
 
 # ===== 状态选项 =====
+STATUS_INBOX = "收集箱"
+STATUS_TODO = "待办"
+STATUS_DOING = "进行中"
+STATUS_WAITING = "等待"
 STATUS_DONE = "已完成"
 STATUS_CANCELLED = "已取消"
+STATUS_DEFERRED = "延期"
 # 视为“已结束、不再提醒”的状态集合
 FINISHED_STATUSES = {STATUS_DONE, STATUS_CANCELLED}
+
+# ===== 优先级选项（建任务表单用） =====
+PRIORITY_OPTIONS = ["P0", "P1", "P2", "P3"]
+
+# ===== 任务类型选项（建任务表单用） =====
+TASK_TYPE_OPTIONS = ["课程", "科研", "作业", "考试", "组会", "生活", "其他"]
+
+# ===== 同步来源选项 =====
+SYNC_SOURCE_CLIENT = "客户端"
 
 # ===== 优先级 -> 重要性分值（1~5）的映射 =====
 # 飞书表中是 P0~P3，优先级算法需要 1~5 的重要性分值

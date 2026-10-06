@@ -12,11 +12,18 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ..constants import FINISHED_STATUSES, TaskFields
+from ..constants import (
+    FINISHED_STATUSES,
+    STATUS_DONE,
+    STATUS_TODO,
+    SYNC_SOURCE_CLIENT,
+    TaskFields,
+)
 from .client import FeishuClient
 
 
@@ -121,11 +128,23 @@ class Task:
     tags: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     reminder_rules: list[str] = field(default_factory=list)
+    # M2 新增：写回与同步需要
+    description: str = ""
+    external_id: str = ""
+    completed_at: datetime | None = None
+    modified_at: datetime | None = None
 
     @property
     def is_finished(self) -> bool:
         """是否已处于结束状态。"""
         return self.status in FINISHED_STATUSES
+
+    @property
+    def modified_ms(self) -> int:
+        """云端最后修改时间（毫秒），无则 0。冲突检测的基准值。"""
+        if self.modified_at is None:
+            return 0
+        return int(self.modified_at.timestamp() * 1000)
 
 
 def to_task(record: dict[str, Any]) -> Task:
@@ -146,6 +165,10 @@ def to_task(record: dict[str, Any]) -> Task:
         tags=parse_multi_select(fields.get(TaskFields.TAGS)),
         depends_on=parse_links(fields.get(TaskFields.DEPENDS_ON)),
         reminder_rules=parse_multi_select(fields.get(TaskFields.REMINDER_RULE)),
+        description=parse_text(fields.get(TaskFields.DESCRIPTION)),
+        external_id=parse_text(fields.get(TaskFields.EXTERNAL_ID)),
+        completed_at=parse_datetime(fields.get(TaskFields.COMPLETED_AT)),
+        modified_at=parse_datetime(fields.get(TaskFields.UPDATED_AT)),
     )
 
 
@@ -177,3 +200,106 @@ def get_overdue_tasks(tasks: list[Task], now: datetime | None = None) -> list[Ta
         for task in tasks
         if not task.is_finished and task.due_at is not None and task.due_at < now
     ]
+
+
+# ----------------------------------------------------------------------
+# 写接口（M2）
+# ----------------------------------------------------------------------
+def generate_external_id() -> str:
+    """生成客户端写入的幂等键，格式 win-<12位hex>。"""
+    return f"win-{uuid.uuid4().hex[:12]}"
+
+
+def _ms(dt: datetime) -> int:
+    """本地 datetime -> 飞书毫秒时间戳。"""
+    return int(dt.timestamp() * 1000)
+
+
+def build_create_fields(
+    *,
+    title: str,
+    due_at: datetime,
+    priority: str,
+    task_type: str,
+    external_id: str,
+    description: str = "",
+    estimate_min: int = 0,
+    reminder_rules: list[str] | None = None,
+) -> dict[str, Any]:
+    """把新建任务的本地输入组装为飞书 fields 字典。"""
+    fields: dict[str, Any] = {
+        TaskFields.TITLE: title,
+        TaskFields.STATUS: STATUS_TODO,
+        TaskFields.PRIORITY: priority,
+        TaskFields.TYPE: task_type,
+        TaskFields.DUE_AT: _ms(due_at),
+        TaskFields.EXTERNAL_ID: external_id,
+        TaskFields.SYNC_SOURCE: SYNC_SOURCE_CLIENT,
+        TaskFields.DELAY_COUNT: 0,
+    }
+    if description:
+        fields[TaskFields.DESCRIPTION] = description
+    if estimate_min > 0:
+        fields[TaskFields.ESTIMATE_MIN] = estimate_min
+    if reminder_rules:
+        fields[TaskFields.REMINDER_RULE] = reminder_rules
+    return fields
+
+
+def build_complete_fields(now: datetime | None = None) -> dict[str, Any]:
+    """完成任务：状态=已完成 + 完成时间=现在。"""
+    now = now or datetime.now()
+    return {
+        TaskFields.STATUS: STATUS_DONE,
+        TaskFields.COMPLETED_AT: _ms(now),
+    }
+
+
+def build_defer_fields(new_due: datetime, delay_count: int) -> dict[str, Any]:
+    """延期任务：新截止时间 + 延期次数+1 + 状态回到待办。"""
+    return {
+        TaskFields.DUE_AT: _ms(new_due),
+        TaskFields.DELAY_COUNT: delay_count + 1,
+        TaskFields.STATUS: STATUS_TODO,
+    }
+
+
+def find_by_external_id(
+    client: FeishuClient, app_token: str, table_id: str, external_id: str
+) -> Task | None:
+    """按外部ID查重，命中则返回已存在的任务（幂等键）。"""
+    conditions = [
+        {"field_name": TaskFields.EXTERNAL_ID, "operator": "is", "value": [external_id]}
+    ]
+    for record in client.search_records(app_token, table_id, conditions):
+        return to_task(record)
+    return None
+
+
+def create_task(
+    client: FeishuClient, app_token: str, table_id: str, fields: dict[str, Any]
+) -> Task:
+    """新建任务（调用方需先按外部ID查重），返回创建后的 Task。"""
+    record = client.create_record(app_token, table_id, fields)
+    return to_task(record)
+
+
+def update_task(
+    client: FeishuClient,
+    app_token: str,
+    table_id: str,
+    record_id: str,
+    fields: dict[str, Any],
+) -> Task:
+    """更新任务（完成/延期共用），返回更新后的 Task。"""
+    record = client.update_record(app_token, table_id, record_id, fields)
+    return to_task(record)
+
+
+def get_remote_modified_ms(
+    client: FeishuClient, app_token: str, table_id: str, record_id: str
+) -> int:
+    """读取云端单条记录的修改时间（毫秒），用于冲突检测。"""
+    record = client.get_record(app_token, table_id, record_id)
+    updated = parse_datetime(record.get("fields", {}).get(TaskFields.UPDATED_AT))
+    return int(updated.timestamp() * 1000) if updated else 0

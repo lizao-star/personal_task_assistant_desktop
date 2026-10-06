@@ -1,4 +1,4 @@
-"""主窗口：展示逾期任务与今日待办。
+"""主窗口：展示逾期任务与今日待办，提供新建/完成/延期入口。
 
 数据来源是 (任务, 优先级分数) 列表；网络请求在后台线程完成，
 本窗口只负责渲染与发出操作信号。
@@ -6,14 +6,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
+    QDateTimeEdit,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -21,8 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import APP_ICON_PATH
 from ..feishu.repository import Task
+from .task_dialog import NewTaskDialog
 from .tray import load_app_icon
 
 # 表格列定义：列名 -> 取值函数
@@ -37,7 +41,7 @@ COLUMNS = [
 
 
 class TaskTable(QTableWidget):
-    """只读任务表格。"""
+    """只读任务表格；内部记录每行的 record_id 供选中取用。"""
 
     def __init__(self):
         super().__init__(0, len(COLUMNS))
@@ -50,10 +54,13 @@ class TaskTable(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         # 任务名这一列自动拉伸占满剩余空间
         self.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        # 每行对应一条任务的 record_id，选中行后从这里取
+        self._row_record_ids: list[str] = []
 
     def render(self, scored_tasks: list[tuple[Task, float]]) -> None:
         """用打分后的任务列表填充表格。"""
         self.setRowCount(len(scored_tasks))
+        self._row_record_ids = [task.record_id for task, _ in scored_tasks]
         for row, (task, score) in enumerate(scored_tasks):
             for col, (_, getter) in enumerate(COLUMNS):
                 item = QTableWidgetItem(getter(task, score))
@@ -66,6 +73,45 @@ class TaskTable(QTableWidget):
                     item.setFont(font)
                 self.setItem(row, col, item)
 
+    def selected_record_id(self) -> str:
+        """当前选中行的 record_id；未选中返回空串。"""
+        row = self.currentRow()
+        if 0 <= row < len(self._row_record_ids):
+            return self._row_record_ids[row]
+        return ""
+
+
+class DeferDialog(QDialog):
+    """延期对话框：快捷预设 + 自定义时间。"""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("延期到")
+        self.setModal(True)
+        self._new_due: datetime | None = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        # 自定义时间
+        row = QHBoxLayout()
+        row.addWidget(QLabel("自定义："))
+        self.dt_edit = QDateTimeEdit(datetime.now() + timedelta(days=1))
+        self.dt_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.dt_edit.setCalendarPopup(True)
+        row.addWidget(self.dt_edit, stretch=1)
+        layout.addLayout(row)
+
+        # 按钮组
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def new_due(self) -> datetime:
+        return self.dt_edit.dateTime().toPython()
+
 
 class MainWindow(QWidget):
     """主窗口。"""
@@ -73,12 +119,15 @@ class MainWindow(QWidget):
     # 用户操作信号（由 main.py 接线）
     sync_requested = Signal()
     pause_toggled = Signal(bool)
+    create_requested = Signal(dict)                       # 新建任务的字段 dict
+    complete_requested = Signal(str)                      # record_id
+    defer_requested = Signal(str, datetime)               # record_id, 新截止时间
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("个人任务助理")
         self.setWindowIcon(load_app_icon())
-        self.resize(720, 560)
+        self.resize(860, 620)
         self._paused = False
         self._build_ui()
 
@@ -90,6 +139,18 @@ class MainWindow(QWidget):
         top = QHBoxLayout()
         self.status_label = QLabel("尚未同步")
         top.addWidget(self.status_label, stretch=1)
+
+        self.new_button = QPushButton("新建任务")
+        self.new_button.clicked.connect(self._on_new_task)
+        top.addWidget(self.new_button)
+
+        self.complete_button = QPushButton("完成")
+        self.complete_button.clicked.connect(self._on_complete)
+        top.addWidget(self.complete_button)
+
+        self.defer_button = QPushButton("延期")
+        self.defer_button.clicked.connect(self._on_defer)
+        top.addWidget(self.defer_button)
 
         self.pause_button = QPushButton("暂停提醒")
         self.pause_button.clicked.connect(self._on_pause_clicked)
@@ -140,6 +201,14 @@ class MainWindow(QWidget):
         if synced_at:
             self.status_label.setText(f"最近同步：{synced_at.strftime('%Y-%m-%d %H:%M')}")
 
+    def set_pending_count(self, n: int) -> None:
+        """状态栏追加待推送条数提示。"""
+        base = self.status_label.text().split("｜")[0]
+        if n > 0:
+            self.status_label.setText(f"{base}｜待推送 {n} 条")
+        else:
+            self.status_label.setText(base)
+
     def show_warning(self, text: str) -> None:
         """显示配置或同步警告。"""
         self.warning_label.setText(text)
@@ -159,10 +228,57 @@ class MainWindow(QWidget):
     def is_paused(self) -> bool:
         return self._paused
 
+    # ------------------------------------------------------------------
+    # 内部回调
+    # ------------------------------------------------------------------
     def _on_pause_clicked(self) -> None:
         """暂停/恢复按钮回调。"""
         self.set_paused(not self._paused)
         self.pause_toggled.emit(self._paused)
+
+    def _on_new_task(self) -> None:
+        """弹出新建任务对话框，确认后发信号给 main.py。"""
+        dlg = NewTaskDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            self.create_requested.emit(dlg.result_dict())
+
+    def _current_selected_record_id(self) -> str:
+        """优先取今日表选中行，其次取逾期表选中行。"""
+        rid = self.today_table.selected_record_id()
+        if rid:
+            return rid
+        return self.overdue_table.selected_record_id()
+
+    def _on_complete(self) -> None:
+        rid = self._current_selected_record_id()
+        if rid:
+            self.complete_requested.emit(rid)
+
+    def _on_defer(self) -> None:
+        rid = self._current_selected_record_id()
+        if not rid:
+            return
+        # 快捷预设菜单
+        menu = QMenu(self)
+        tonight = menu.addAction("今晚 23:59")
+        tomorrow = menu.addAction("明天 18:00")
+        custom = menu.addAction("自定义时间…")
+        chosen = menu.exec(self.defer_button.mapToGlobal(self.defer_button.rect().bottomLeft()))
+        if chosen is None:
+            return
+        now = datetime.now()
+        if chosen is tonight:
+            new_due = now.replace(hour=23, minute=59, second=0, microsecond=0)
+        elif chosen is tomorrow:
+            new_due = (now + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+        elif chosen is custom:
+            dlg = DeferDialog(self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            new_due = dlg.new_due()
+        else:
+            return
+        self.defer_requested.emit(rid, new_due)
 
     def closeEvent(self, event) -> None:
         """点击关闭按钮时不退出程序，隐藏到托盘继续后台运行。"""
