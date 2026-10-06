@@ -1,0 +1,120 @@
+# 个人学习任务助理
+
+面向研究生的「**飞书多维表格为中心 + AI 规划 + 桌面监督**」个人效率系统。
+
+> 一句话定位：**AI 帮我规划、拆解、提醒、监督、复盘**——不是「AI 帮我完成任务」。
+
+当前进度：**M1 已完成（Windows 客户端 v0.1），M2 待开始**。
+
+---
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [CLAUDE.md](CLAUDE.md) | **项目入口**：项目现状、项目规则、技术栈、编码约定 |
+| [docs/设计总纲.md](docs/设计总纲.md) | 需求边界、系统架构、数据模型、模块设计、风险 |
+| [docs/飞书表结构.md](docs/飞书表结构.md) | 6 张表的字段定义、视图、飞书自动化配置 |
+| [docs/路线图.md](docs/路线图.md) | M0~M8 分步落地路径与验收标准 |
+| [docs/API.md](docs/API.md) | 飞书 OpenAPI 调用、字段映射、算法与重试策略 |
+
+---
+
+## 功能现状（M1）
+
+- [x] 读取飞书多维表格「任务表」，自动分页拉取
+- [x] 展示**今日待办**与**逾期任务**，按优先级分数排序
+- [x] 本地 SQLite 缓存，断网时仍可显示最近一次任务
+- [x] Windows 系统通知 + 离线中文语音（仅勾选「是否语音提醒」的任务）
+- [x] 勿扰时段（默认 23:00–07:00）静默；提醒暂停开关
+- [x] 系统托盘常驻、关闭窗口最小化到托盘、开机自启
+- [ ] 客户端写回任务（M2）
+- [ ] AI 拆解任务（M3）
+- [ ] 娱乐监督与浏览器扩展（M4）
+- [ ] 飞书机器人（M5）
+
+## 快速开始
+
+### 1. 准备飞书应用（一次性）
+
+1. 打开[飞书开放平台](https://open.feishu.cn/)，创建**企业自建应用**，记录 `App ID` 与 `App Secret`。
+2. 在「权限管理」开通多维表格权限：`bitable:app:readonly`（M1 只读即可）。
+3. 创建应用版本并发布；然后打开你的多维表格，点右上角「... → 添加文档应用」，把该应用加为协作者。
+4. 从多维表格 URL 取得：
+   - `app_token`：URL 中 `/base/` 后面那段；
+   - `table_id`：打开任务表后 URL 中 `table=` 参数。
+
+### 2. 创建并激活虚拟环境
+
+```powershell
+cd client_windows
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+### 3. 安装依赖
+
+```powershell
+pip install -r requirements.txt
+```
+
+### 4. 配置凭证
+
+```powershell
+# 回到工作区根目录操作
+copy config\.env.example config\.env
+```
+
+编辑 `config/.env`，填入四个必填项：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_APP_TOKEN`、`FEISHU_TASK_TABLE_ID`。
+
+### 5. 验证连接（可选，不开界面）
+
+```powershell
+cd client_windows
+python test_connection.py
+```
+
+### 6. 运行
+
+```powershell
+cd client_windows
+python run.py
+```
+
+启动后托盘出现图标；双击图标或菜单「打开主界面」查看今日待办。
+
+## 常用操作
+
+| 操作 | 方式 |
+| --- | --- |
+| 立即同步 | 主窗口按钮或托盘菜单 |
+| 暂停/恢复提醒 | 主窗口按钮或托盘菜单 |
+| 开机自启 | 托盘菜单勾选（写入当前用户注册表） |
+| 关闭程序 | 托盘菜单「退出」（点窗口 × 只是隐藏到托盘） |
+
+## 运行配置
+
+`config/settings.yaml`（无需密钥，可提交）：
+
+- `sync.interval_seconds`：自动同步间隔，默认 45 秒
+- `do_not_disturb`：勿扰时段，默认 23:00–07:00
+- `reminder.check_interval_seconds`：提醒检查间隔，默认 30 秒
+- `reminder.missed_window_minutes`：错过提醒的补发窗口，默认 60 分钟
+- `reminder.tts.engine`：语音引擎，当前支持 `pyttsx3`
+
+## 单元测试
+
+在 `client_windows` 目录下（虚拟环境已激活）：
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+## 资源占用目标
+
+- 常驻内存 < 150 MB，空闲 CPU < 1%
+- 自动同步默认 45 秒一次（飞书 API 有限流，不建议更短）
+
+## 下一步
+
+进入 **M2：客户端写回**（新建 / 完成 / 延期任务）、增量同步与离线队列，详见 [docs/路线图.md](docs/路线图.md)。

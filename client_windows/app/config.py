@@ -1,0 +1,80 @@
+"""配置加载模块：读取 config/.env（密钥）与 config/settings.yaml（运行参数）。
+
+目录约定：
+    work/                       <- 工作区根目录
+      config/.env               <- 飞书凭证（不提交）
+      config/settings.yaml      <- 运行配置（可提交）
+      client_windows/           <- 本客户端
+        app/config.py
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+from dotenv import load_dotenv
+
+# 本文件位于 client_windows/app/config.py
+# parents[0]=app  [1]=client_windows  [2]=工作区根目录
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = WORKSPACE_ROOT / "config"
+CLIENT_ROOT = WORKSPACE_ROOT / "client_windows"
+DATA_DIR = CLIENT_ROOT / "data"
+ASSETS_DIR = CLIENT_ROOT / "assets"
+APP_ICON_PATH = ASSETS_DIR / "app_icon.png"
+
+
+@dataclass(frozen=True)
+class FeishuCredential:
+    """飞书应用与数据表标识。"""
+
+    app_id: str
+    app_secret: str
+    app_token: str
+    task_table_id: str
+
+    @property
+    def is_ready(self) -> bool:
+        """凭证是否齐全（决定能否发起同步）。"""
+        return all([self.app_id, self.app_secret, self.app_token, self.task_table_id])
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """应用完整配置。"""
+
+    credential: FeishuCredential
+    settings: dict[str, Any]
+
+
+def _load_settings() -> dict[str, Any]:
+    """读取 settings.yaml，文件缺失时返回空字典（调用方需自行兜底）。"""
+    settings_path = CONFIG_DIR / "settings.yaml"
+    if not settings_path.exists():
+        return {}
+    with settings_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data
+
+
+def load_config() -> AppConfig:
+    """加载并组合 .env 与 settings.yaml。"""
+    # 确保本地数据目录存在（SQLite 缓存要用）
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 加载 .env（若存在）
+    env_path = CONFIG_DIR / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+
+    credential = FeishuCredential(
+        app_id=os.getenv("FEISHU_APP_ID", "").strip(),
+        app_secret=os.getenv("FEISHU_APP_SECRET", "").strip(),
+        app_token=os.getenv("FEISHU_APP_TOKEN", "").strip(),
+        task_table_id=os.getenv("FEISHU_TASK_TABLE_ID", "").strip(),
+    )
+    return AppConfig(credential=credential, settings=_load_settings())

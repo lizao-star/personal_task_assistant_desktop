@@ -1,0 +1,32 @@
+# ===== 密钥与环境变量（绝不提交） =====
+.env
+config/.env
+*.env
+!.env.example
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 本地数据缓存（仅本机使用） =====
+client_windows/data/*.db
+client_windows/data/*.db-journal
+client_windows/data/*.db-wal
+client_windows/data/*.db-shm
+
+# ===== 日志 =====
+*.log
+debug.log
+
+# ===== IDE / 系统杂项 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
