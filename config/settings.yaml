@@ -57,7 +57,7 @@ monitor:
   whitelist_domains: ["feishu.cn", "github.com", "cnki.net", "scholar.google.com"]
   # 娱乐黑名单：只有显式命中以下任一维度才计入娱乐时长。
   # 三个列表都为空时监督不生效（避免任何窗口都被误判为娱乐）。
-  blacklist_domains: ["douyin.com", "bilibili.com", "tiktok.com", "youtube.com", "weibo.com", "zhihu.com", "xiaohongshu.com", "iqiyi.com", "youku.com", "twitch.tv"]
+  blacklist_domains: ["douyin.com", "tiktok.com", "youtube.com", "weibo.com", "xiaohongshu.com", "iqiyi.com", "youku.com", "twitch.tv"]
   blacklist_keywords: ["抖音", "哔哩哔哩", "bilibili", "爱奇艺", "腾讯视频", "优酷", "小红书", "微博", "游戏"]
   blacklist_processes: ["douyin.exe", "云·原神.exe", "yuanshen.exe", "steam.exe"]
   # 升级阈值（分钟）：连续娱乐达到该时长依次触发 L1/L2/L3/L4
@@ -72,3 +72,8 @@ monitor:
   pause_with_reminder: true
   # 本地 API 端口（接收浏览器扩展上报与关标签页指令）
   local_api_port: 8765
+
+# 番茄钟设置（M4 补充；纯计时，不绑定任务、不与娱乐监督联动）
+pomodoro:
+  focus_minutes: 25   # 专注时长
+  rest_minutes: 5     # 休息时长

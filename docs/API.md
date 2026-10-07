@@ -538,3 +538,16 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 ### 11.8 配置示例
 
 见 `config/settings.yaml` 中 `monitor` 段；表 ID 在 `config/.env` 的 `FEISHU_MONITOR_LOG_TABLE_ID`，不填则仅本地缓存不入飞书。
+
+## 12. 番茄钟（M4 补充）
+
+纯本地计时器，**不读写飞书、不落 SQLite、不与娱乐监督联动**（监督照常运行）。
+
+- 实现：`app/services/pomodoro.py` 的 `PomodoroTimer`（QObject + 主线程 QTimer，每秒 tick，无 IO 无独立线程）。
+- 状态机：`idle → focus → rest → idle`，纯函数 `next_phase(state)` 描述转移；手动 `stop()` 回 idle 且不发 `phase_finished`。
+- 信号：
+  - `state_changed(state, remaining_seconds)`：状态变化与每秒 tick 发出，托盘菜单据此更新倒计时文案（`tray.set_pomodoro_state`）；
+  - `phase_finished(phase, message)`：专注/休息自然结束发出，`main.py` 接 `Notifier.notify + speak`。
+- 时长注入：构造参数 `focus_seconds` / `rest_seconds`，读自 `settings.yaml` 的 `pomodoro.focus_minutes`（默认 25）与 `pomodoro.rest_minutes`（默认 5），分钟 × 60 注入。
+- 入口：仅托盘菜单「开始/停止番茄钟」（`tray.pomodoro_action`）；重启后状态不保留。
+- 后续扩展位（本期未做）：绑定任务累计「实际耗时」、每 4 个番茄的长休息、休息期豁免监督。

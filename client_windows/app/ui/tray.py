@@ -1,6 +1,6 @@
 """系统托盘控制器。
 
-菜单：显示主窗口 / 立即同步 / 暂停提醒 / 娱乐监督 / 开机自启 / 退出。
+菜单：显示主窗口 / 立即同步 / 暂停提醒 / 娱乐监督 / 番茄钟 / 开机自启 / 退出。
 双击托盘图标显示主窗口。
 """
 
@@ -52,6 +52,9 @@ class TrayController:
         self.monitor_action.setChecked(True)
         menu.addAction(self.monitor_action)
 
+        self.pomodoro_action = QAction("开始番茄钟", parent)
+        menu.addAction(self.pomodoro_action)
+
         menu.addSeparator()
 
         self.autostart_action = QAction("开机自启", parent)
@@ -74,6 +77,16 @@ class TrayController:
     def show_message(self, title: str, message: str) -> None:
         """在托盘处显示一条气泡消息。"""
         self.tray.showMessage(title, message)
+
+    def set_pomodoro_state(self, state: str, remaining: int) -> None:
+        """按番茄钟状态更新菜单文案（倒计时显示到分钟:秒）。"""
+        minutes, seconds = divmod(max(0, remaining), 60)
+        if state == "focus":
+            self.pomodoro_action.setText(f"停止番茄钟（专注剩 {minutes:02d}:{seconds:02d}）")
+        elif state == "rest":
+            self.pomodoro_action.setText(f"停止番茄钟（休息剩 {minutes:02d}:{seconds:02d}）")
+        else:
+            self.pomodoro_action.setText("开始番茄钟")
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """双击托盘图标时显示主窗口。"""

@@ -53,6 +53,7 @@ from .services.kill_tab import close_tab
 from .services.local_api import LocalApiServer
 from .services.monitor import MonitorWorker
 from .services.overlay import Overlay
+from .services.pomodoro import STATE_IDLE, PomodoroTimer
 from .services.priority import rank_tasks
 from .services.reminder import Notifier, ReminderEngine
 from .services.sync import SyncService
@@ -171,6 +172,14 @@ class AssistantApp(QObject):
         self._monitor_enabled = bool(monitor_cfg.get("enabled", True))
         self._init_monitor()
 
+        # ----- M4 补充：番茄钟（纯计时，主线程 QTimer，不与监督联动） -----
+        pomo_cfg = self._settings.get("pomodoro", {})
+        self._pomodoro = PomodoroTimer(
+            focus_seconds=int(pomo_cfg.get("focus_minutes", 25)) * 60,
+            rest_seconds=int(pomo_cfg.get("rest_minutes", 5)) * 60,
+            parent=self.window,
+        )
+
         self._wire_signals()
         self._start_timers()
         self._bootstrap()
@@ -196,6 +205,11 @@ class AssistantApp(QObject):
         self.tray.monitor_action.triggered.connect(self._on_monitor_toggled)
         self.tray.autostart_action.triggered.connect(self._on_autostart_toggled)
         self.tray.quit_action.triggered.connect(self._quit)
+
+        # M4 补充：番茄钟
+        self.tray.pomodoro_action.triggered.connect(self._on_pomodoro_clicked)
+        self._pomodoro.state_changed.connect(self.tray.set_pomodoro_state)
+        self._pomodoro.phase_finished.connect(self._on_pomodoro_phase_finished)
 
         # M4：监控引擎信号
         if self._monitor_worker is not None:
@@ -571,6 +585,23 @@ class AssistantApp(QObject):
             self._overlay.deleteLater()
             self._overlay = None
 
+    # ------------------------------------------------------------------
+    # M4 补充：番茄钟
+    # ------------------------------------------------------------------
+    @Slot()
+    def _on_pomodoro_clicked(self) -> None:
+        """托盘菜单点击：空闲则开始，运行中则停止。"""
+        if self._pomodoro.state == STATE_IDLE:
+            self._pomodoro.start()
+        else:
+            self._pomodoro.stop()
+
+    @Slot(str, str)
+    def _on_pomodoro_phase_finished(self, phase: str, text: str) -> None:
+        """番茄钟阶段自然结束：系统通知 + 语音（遵守 Notifier 勿扰/降级逻辑）。"""
+        self._notifier.notify("番茄钟", text)
+        self._notifier.speak(text)
+
     @Slot(dict)
     def _on_monitor_session_ended(self, aggregate: dict) -> None:
         """会话结束：入队日志并触发增量同步推送。"""
@@ -616,6 +647,8 @@ class AssistantApp(QObject):
             self._local_api.stop()
         except Exception:
             pass
+        # M4 补充：停番茄钟
+        self._pomodoro.stop()
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(15000)
