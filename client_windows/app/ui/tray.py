@@ -1,6 +1,6 @@
 """系统托盘控制器。
 
-菜单：显示主窗口 / 立即同步 / 暂停提醒 / 开机自启 / 退出。
+菜单：显示主窗口 / 立即同步 / 暂停提醒 / 娱乐监督 / 开机自启 / 退出。
 双击托盘图标显示主窗口。
 """
 
@@ -46,6 +46,11 @@ class TrayController:
         self.pause_action = QAction("暂停提醒", parent)
         self.pause_action.setCheckable(True)
         menu.addAction(self.pause_action)
+
+        self.monitor_action = QAction("娱乐监督", parent)
+        self.monitor_action.setCheckable(True)
+        self.monitor_action.setChecked(True)
+        menu.addAction(self.monitor_action)
 
         menu.addSeparator()
 

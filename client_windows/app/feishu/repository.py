@@ -19,6 +19,7 @@ from typing import Any
 
 from ..constants import (
     FINISHED_STATUSES,
+    MonitorLogFields,
     STATUS_DONE,
     STATUS_INBOX,
     STATUS_TODO,
@@ -302,6 +303,17 @@ def _ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _hyperlink(value: str) -> dict[str, str]:
+    """把 URL 字符串组装为飞书「超链接」字段值对象。
+
+    超链接字段（field type 15）写入格式必须为 {"text": ..., "link": ...}，
+    link 需带协议头；缺协议时按 https 补齐。
+    """
+    text = (value or "").strip()
+    link = text if text.startswith(("http://", "https://")) else f"https://{text}"
+    return {"text": text, "link": link}
+
+
 def build_create_fields(
     *,
     title: str,
@@ -447,3 +459,57 @@ def get_remote_modified_ms(
     record = client.get_record(app_token, table_id, record_id)
     updated = parse_datetime(record.get("fields", {}).get(TaskFields.UPDATED_AT))
     return int(updated.timestamp() * 1000) if updated else 0
+
+
+# ----------------------------------------------------------------------
+# 娱乐监控日志表写入（M4）
+# ----------------------------------------------------------------------
+def build_monitor_log_fields(
+    *,
+    occurred_at: datetime,
+    duration_seconds: int,
+    process_name: str = "",
+    window_title: str = "",
+    url: str = "",
+    notified: bool = False,
+    notify_count: int = 0,
+    closed: bool = False,
+    note: str = "",
+) -> dict[str, Any]:
+    """把一次娱乐会话的聚合结果组装为飞书日志表 fields 字典。
+
+    一次会话只产出一条聚合记录，不逐秒上报（避免触发飞书限流）。
+    字段定义见 constants.MonitorLogFields。
+    """
+    fields: dict[str, Any] = {
+        MonitorLogFields.OCCURRED_AT: _ms(occurred_at),
+        MonitorLogFields.DURATION: duration_seconds,
+        MonitorLogFields.NOTIFIED: notified,
+        MonitorLogFields.NOTIFY_COUNT: notify_count,
+        MonitorLogFields.CLOSED: closed,
+    }
+    if process_name:
+        fields[MonitorLogFields.PROCESS_NAME] = process_name
+    if window_title:
+        fields[MonitorLogFields.WINDOW_TITLE] = window_title
+    if url:
+        # 「URL」列是飞书「超链接」字段（非纯文本），必须传 {"text","link"} 对象，
+        # 传字符串会报 1254068 URLFieldConvFail。
+        fields[MonitorLogFields.URL] = _hyperlink(url)
+    if note:
+        fields[MonitorLogFields.NOTE] = note
+    return fields
+
+
+def create_monitor_log(
+    client: FeishuClient, app_token: str, table_id: str, fields: dict[str, Any]
+) -> None:
+    """新建一条娱乐监控日志记录（无冲突检测，建记录即删本地队列行）。
+
+    兜底归一化：离线队列中可能残留历史入队的旧格式 payload（URL 存的是
+    纯字符串），这里统一转为超链接对象，避免旧行永远推送失败、无限重试刷屏。
+    """
+    url = fields.get(MonitorLogFields.URL)
+    if url and not isinstance(url, dict):
+        fields = {**fields, MonitorLogFields.URL: _hyperlink(url)}
+    client.create_record(app_token, table_id, fields)

@@ -328,12 +328,12 @@ ai_breakdown（M3，采纳 AI 拆解）：
 
 ### 幂等策略
 
-| 操作         | 幂等机制                                                                                                      |
-| ------------ | ------------------------------------------------------------------------------------------------------------- |
+| 操作         | 幂等机制                                                                                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | create       | 推送前按 `外部ID` 调 `search_records` 查重，命中即复用已存在记录，并对其**补写**本次携带的子任务（幂等重推不重复建主任务，但子任务不会丢） |
-| complete     | `PUT` 本身幂等；状态/完成时间覆盖写，无副作用                                                                  |
-| defer        | 同上                                                                                                          |
-| ai_breakdown | 同上（`base_ms` 冲突检测 + 覆盖写 AI拆解/检查清单/AI建议 三字段后写入子任务）                                  |
+| complete     | `PUT` 本身幂等；状态/完成时间覆盖写，无副作用                                                                                              |
+| defer        | 同上                                                                                                                                       |
+| ai_breakdown | 同上（`base_ms` 冲突检测 + 覆盖写 AI拆解/检查清单/AI建议 三字段后写入子任务）                                                              |
 
 ### 冲突检测
 
@@ -431,10 +431,110 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 ---
 
-## 10. M4 及后续将新增的接口（预告，当前未实现）
+## 10. 后续将新增的接口（预告，当前未实现）
 
 - 批量接口：`.../records/batch_create`、`batch_update`
 - 发送消息：`POST /open-apis/im/v1/messages`
 - 卡片回调：事件订阅 `card.action.trigger`
-- 本地监控上报 API：`POST http://127.0.0.1:8765/report`（M4）
 - 自建服务端 REST：`/tasks`、`/sync/changes`（M6）
+
+---
+
+## 11. 娱乐监督模块（M4 已实现）
+
+### 11.1 监督数据流
+
+```
+前台窗口（Win32 psutil+pywin32）  ┐
+                                  ├─→ MonitorWorker 5 秒采样 ─→ 状态机决策
+浏览器扩展（MV3 content_script） ┘            │
+                                              ├─ L1/L2/L3 → Notifier.notify + speak
+                                              ├─ L4 → Overlay 全屏遮罩 / KillTab 关网页
+                                              └─ 会话结束 → 聚合入队 → SyncWorker.push_monitor_logs → 飞书日志表
+```
+
+### 11.2 本地 HTTP API（仅本机回环 127.0.0.1:8765）
+
+无鉴权，仅供浏览器扩展与本机客户端通信。
+
+| 方法 | 路径          | 用途                                                | body                             |
+| ---- | ------------- | --------------------------------------------------- | -------------------------------- |
+| GET  | `/health`     | 扩展探测客户端存活（心跳）                          | —                                |
+| POST | `/report`     | 扩展上报当前活跃标签                                | `{domain, title, seconds, ts}`   |
+| POST | `/close-tab`  | 客户端记录关标签请求（扩展下次 `/poll-close` 取走） | `{domain}`                       |
+| POST | `/poll-close` | 扩展轮询取走一条关标签请求                          | — 返回 `{ok, request: {domain}}` |
+
+### 11.3 升级阈值与动作
+
+| 级别 | 默认触发（分钟） | 动作                                                                          |
+| ---- | ---------------- | ----------------------------------------------------------------------------- |
+| L1   | 10               | 系统通知                                                                      |
+| L2   | 20               | 系统通知 + TTS 语音                                                           |
+| L3   | 30               | 再次通知 + 日志备注                                                           |
+| L4   | 45               | `monitor.l4_action` 配置：`overlay`（全屏遮罩） \| `kill_tab`（强制关闭网页） |
+
+阈值可在 `config/settings.yaml` 的 `monitor.escalation` 段覆盖；动作 `monitor.l4_action` 二选一。
+
+### 11.4 强制关闭网页（kill_tab）双路径
+
+1. 扩展在线（30 秒内有过 `/health`、`/report` 或 `/poll-close`）：客户端 `request_close_tab(domain)` 把请求塞进本地 API 队列，扩展下次轮询 `/poll-close` 时取走，经 `chrome.runtime.sendMessage` 交给 background.js 执行 `chrome.tabs.query({url:"*://domain/*"}) + chrome.tabs.remove`，只关匹配标签。
+2. 扩展离线：降级 `pywin32.EnumWindows + GetWindowText`，按窗口标题含 domain 关键词 `PostMessage(WM_CLOSE)`，关匹配窗口（可能关整个浏览器，不杀进程）。
+
+> 内容脚本无权访问 `chrome.tabs`，关标签必须经 `chrome.runtime.sendMessage` 交给 background service worker 执行。
+
+### 11.5 娱乐监控日志表字段映射
+
+由 `app/feishu/repository.build_monitor_log_fields()` 组装，写入由 `app/services/sync.SyncService.push_monitor_logs()` 推送。
+
+| 飞书字段 | 类型     | 来源字段           | 说明                                   |
+| -------- | -------- | ------------------ | -------------------------------------- |
+| 时间     | 日期时间 | `occurred_at`      | 会话结束时刻，毫秒时间戳               |
+| 进程名   | 文本     | `process_name`     | 如 `chrome.exe`                        |
+| 窗口标题 | 文本     | `window_title`     | 取停留时间最长的样本                   |
+| URL      | 超链接   | `url`              | 域名，写入为 `{"text","link"}` 对象    |
+| 持续时长 | 数字     | `duration_seconds` | 秒                                     |
+| 是否提醒 | 复选框   | `notified`         | `fired_count > 0` 即 true              |
+| 提醒次数 | 数字     | `notify_count`     | 触发过的级别数                         |
+| 是否关闭 | 复选框   | `closed`           | 遮罩被用户点关闭后置 true              |
+| 备注     | 多行文本 | `note`             | 收尾原因（whitelist/idle/paused/stop） |
+
+### 11.6 缓存表 schema（SQLite）
+
+| 表                     | 用途                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------- |
+| `monitor_session`      | 单行，当前活跃娱乐会话状态（level/fired_count/closed/started_at/last_sample_at/payload） |
+| `pending_monitor_logs` | 待推送飞书的聚合日志队列，建记录即删                                                     |
+
+幂等：日志表只新增不更新，建记录即删本地行，无冲突检测。
+
+### 11.7 娱乐命中判定（白名单 + 黑名单）
+
+前台窗口先过白名单（`monitor.whitelist_titles` / `whitelist_domains`，命中即豁免），
+再走 `monitor_rules.is_distraction()` 黑名单判定：**必须显式命中**以下任一维度才计入娱乐时长，避免任意窗口被误判。
+
+| 维度       | 配置项                        | 匹配方式                               |
+| ---------- | ----------------------------- | -------------------------------------- |
+| 域名       | `monitor.blacklist_domains`   | 扩展上报域名包含关键词（大小写不敏感） |
+| 标题关键词 | `monitor.blacklist_keywords`  | 前台窗口标题包含关键词                 |
+| 进程名     | `monitor.blacklist_processes` | 前台进程名完全相等                     |
+
+三个列表全为空时监督不生效。扩展上报的域名**只在前台进程是浏览器时采信**，且标题与域名**取自同一次上报**（避免「标题=飞书、URL=bilibili」错配）；上报超过 15 秒（`_REPORT_TTL_SECONDS`）即视为过期。
+
+### 11.7.1 统一计时器与容忍窗口（M4 修正）
+
+**所有娱乐平台共用一个会话与计时器**：会话 `started_at` 只在首次进入娱乐时设定，
+在不同娱乐平台（抖音/bilibili/…）间切换**不清零**，累计为同一个会话。
+
+**容忍窗口**：短暂切走（查资料、回消息）时**不立即结束会话**，而是在
+`monitor.grace_seconds`（默认 60 秒）内保持「grace」状态：
+
+- 窗口内切回娱乐：**沿用原会话**继续累计，不新建、不重复写日志；
+- 窗口内离开的时间计入 `away_seconds`，从总时长中扣除（日志时长与升级计时口径一致）；
+- 超过窗口仍未回到娱乐：才真正结束会话，聚合成**一条**日志。
+
+这样保证「来回切换多个娱乐平台」只产出一条聚合记录。每次采样刷新 `last_sample_at`，
+修复长会话因时间戳不更新而被误判为陈旧、计时器被重置的问题。
+
+### 11.8 配置示例
+
+见 `config/settings.yaml` 中 `monitor` 段；表 ID 在 `config/.env` 的 `FEISHU_MONITOR_LOG_TABLE_ID`，不填则仅本地缓存不入飞书。

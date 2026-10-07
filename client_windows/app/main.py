@@ -19,7 +19,16 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    Q_ARG,
+    QMetaObject,
+    QObject,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .ai.provider import DeepSeekProvider
@@ -40,6 +49,10 @@ from .feishu.repository import (
 )
 from .services import autostart
 from .services.cache import LocalCache
+from .services.kill_tab import close_tab
+from .services.local_api import LocalApiServer
+from .services.monitor import MonitorWorker
+from .services.overlay import Overlay
 from .services.priority import rank_tasks
 from .services.reminder import Notifier, ReminderEngine
 from .services.sync import SyncService
@@ -78,9 +91,12 @@ class SyncWorker(QObject):
                 c.task_table_id,
                 self._cache,
                 subtask_table_id=c.subtask_table_id,
+                monitor_log_table_id=c.monitor_log_table_id,
             )
             if self._full:
                 tasks = svc.full_pull()
+                # 全量同步时也顺带推一下娱乐日志（避免堆积）
+                svc.push_monitor_logs()
                 self.succeeded.emit(tasks)
             else:
                 _, conflicts, last_error = svc.push_pending()
@@ -89,6 +105,8 @@ class SyncWorker(QObject):
                 if conflicts:
                     # 冲突先回主线程，让用户决定后再触发下一轮
                     self.conflicts.emit(conflicts)
+                # 娱乐日志推送（无冲突检测，建记录即删）
+                svc.push_monitor_logs()
                 tasks = svc.incremental_pull()
                 self.succeeded.emit(tasks)
         except Exception as e:
@@ -140,6 +158,19 @@ class AssistantApp(QObject):
         self._paused = False
         self._timeout = 10
 
+        # ----- M4：娱乐监督 -----
+        # 全屏遮罩（懒加载，避免启动即弹出）
+        self._overlay: Overlay | None = None
+        # 本地 API（接收扩展上报 / 下发关标签请求）
+        monitor_cfg = self._settings.get("monitor", {})
+        api_port = int(monitor_cfg.get("local_api_port", 8765))
+        self._local_api = LocalApiServer(port=api_port)
+        # 监控引擎（在独立 QThread）
+        self._monitor_thread: QThread | None = None
+        self._monitor_worker: MonitorWorker | None = None
+        self._monitor_enabled = bool(monitor_cfg.get("enabled", True))
+        self._init_monitor()
+
         self._wire_signals()
         self._start_timers()
         self._bootstrap()
@@ -162,8 +193,15 @@ class AssistantApp(QObject):
         self.tray.show_action.triggered.connect(self._show_window)
         self.tray.sync_action.triggered.connect(self.start_sync)
         self.tray.pause_action.triggered.connect(self._on_pause_changed)
+        self.tray.monitor_action.triggered.connect(self._on_monitor_toggled)
         self.tray.autostart_action.triggered.connect(self._on_autostart_toggled)
         self.tray.quit_action.triggered.connect(self._quit)
+
+        # M4：监控引擎信号
+        if self._monitor_worker is not None:
+            self._monitor_worker.notify_requested.connect(self._on_monitor_notify)
+            self._monitor_worker.action_requested.connect(self._on_monitor_action)
+            self._monitor_worker.session_ended.connect(self._on_monitor_session_ended)
 
     def _start_timers(self) -> None:
         """启动自动同步与提醒检查定时器。"""
@@ -438,10 +476,19 @@ class AssistantApp(QObject):
         self.window.activateWindow()
 
     def _on_pause_changed(self, paused: bool) -> None:
-        """统一处理暂停提醒（窗口与托盘状态保持一致）。"""
+        """统一处理暂停提醒（窗口与托盘状态保持一致）。
+
+        M4 起：暂停提醒同时暂停娱乐监督（pause_with_reminder=True 时）。
+        """
         self._paused = paused
         self.window.set_paused(paused)
         self.tray.pause_action.setChecked(paused)
+        if self._monitor_worker is not None:
+            # 通过信号把暂停状态投递到监控线程
+            QMetaObject.invokeMethod(
+                self._monitor_worker, "set_paused", Qt.QueuedConnection,
+                Q_ARG(bool, paused),
+            )
 
     def _on_autostart_toggled(self, checked: bool) -> None:
         """开机自启开关。"""
@@ -449,10 +496,126 @@ class AssistantApp(QObject):
         # 注册表写入可能失败，回读真实状态纠正勾选
         self.tray.autostart_action.setChecked(autostart.is_enabled())
 
+    # ------------------------------------------------------------------
+    # M4：娱乐监督接线
+    # ------------------------------------------------------------------
+    def _init_monitor(self) -> None:
+        """初始化监控引擎（独立 QThread + 本地 API 服务）。"""
+        if not self._monitor_enabled:
+            return
+        # 启动本地 API
+        try:
+            self._local_api.start()
+        except OSError as e:
+            # 端口被占用：监督仍可跑（无扩展上报，只靠 Win32 取窗口）
+            print(f"[监督] 本地 API 启动失败（端口可能被占用）：{e}")
+        # 启动监控线程
+        self._monitor_thread = QThread()
+        self._monitor_worker = MonitorWorker(
+            self._cache, self._local_api, self._settings
+        )
+        self._monitor_worker.moveToThread(self._monitor_thread)
+        self._monitor_thread.started.connect(self._monitor_worker.start)
+        self._monitor_thread.start()
+
+    def _on_monitor_toggled(self, checked: bool) -> None:
+        """托盘「娱乐监督」开关。"""
+        self._monitor_enabled = checked
+        if self._monitor_worker is None:
+            return
+        if checked:
+            QMetaObject.invokeMethod(
+                self._monitor_worker, "start", Qt.QueuedConnection,
+            )
+        else:
+            QMetaObject.invokeMethod(
+                self._monitor_worker, "stop", Qt.QueuedConnection,
+            )
+
+    @Slot(int, str)
+    def _on_monitor_notify(self, level: int, text: str) -> None:
+        """监控引擎要求通知/语音：level >= L2 时同时语音。"""
+        from .constants import MONITOR_LEVEL_L2
+        self._notifier.notify("娱乐监督提醒", text)
+        if level >= MONITOR_LEVEL_L2:
+            self._notifier.speak(text)
+
+    @Slot(str, str, str, int)
+    def _on_monitor_action(self, kind: str, domain: str, title: str, minutes: int) -> None:
+        """监控引擎要求执行 L4 动作：overlay 或 kill_tab。"""
+        from .constants import MONITOR_ACTION_KILL_TAB, MONITOR_ACTION_OVERLAY
+        if kind == MONITOR_ACTION_OVERLAY:
+            # 已有遮罩在显示则不重复创建
+            if self._overlay is not None:
+                return
+            self._overlay = Overlay(self.window)
+            self._overlay.set_minutes(minutes)
+            # 关闭信号回写监控会话 closed 标志
+            self._overlay.closed.connect(self._mark_monitor_closed)
+            self._overlay.show()
+            self._overlay.raise_()
+            self._overlay.activateWindow()
+        elif kind == MONITOR_ACTION_KILL_TAB:
+            # 异步关网页，不阻塞主线程
+            result = close_tab(domain, title, self._local_api)
+            if result.get("ok"):
+                # 关闭成功：标记会话 closed，避免同一会话反复触发
+                self._mark_monitor_closed()
+
+    def _mark_monitor_closed(self) -> None:
+        """L4 动作已生效：回写监控会话 closed=True，并释放遮罩资源。"""
+        session = self._cache.load_monitor_session()
+        if session is not None:
+            self._cache.update_monitor_session(closed=True)
+        if self._overlay is not None:
+            self._overlay.deleteLater()
+            self._overlay = None
+
+    @Slot(dict)
+    def _on_monitor_session_ended(self, aggregate: dict) -> None:
+        """会话结束：入队日志并触发增量同步推送。"""
+        # 把聚合字段转成飞书 fields 并入队
+        from datetime import datetime as _dt
+        from .feishu.repository import build_monitor_log_fields
+        try:
+            occurred_at = aggregate.get("occurred_at")
+            if isinstance(occurred_at, str):
+                occurred_at = _dt.fromisoformat(occurred_at)
+            fields = build_monitor_log_fields(
+                occurred_at=occurred_at or _dt.now(),
+                duration_seconds=int(aggregate.get("duration_seconds", 0)),
+                process_name=aggregate.get("process_name", ""),
+                window_title=aggregate.get("window_title", ""),
+                url=aggregate.get("url", ""),
+                notified=bool(aggregate.get("notified", False)),
+                notify_count=int(aggregate.get("notify_count", 0)),
+                closed=bool(aggregate.get("closed", False)),
+                note=aggregate.get("note", ""),
+            )
+            self._cache.enqueue_monitor_log(fields)
+        except Exception as e:
+            print(f"[监督] 会话日志入队失败：{e}")
+        # 触发增量同步把日志推到飞书
+        self.start_incremental_sync()
+
     def shutdown(self) -> None:
         """退出前收尾：停定时器，等待同步线程结束。"""
         self.sync_timer.stop()
         self.reminder_timer.stop()
+        # M4：停监控线程与本地 API
+        if self._monitor_worker is not None:
+            QMetaObject.invokeMethod(
+                self._monitor_worker, "stop", Qt.QueuedConnection,
+            )
+        if self._monitor_thread is not None:
+            self._monitor_thread.quit()
+            self._monitor_thread.wait(5000)
+            self._monitor_thread = None
+            self._monitor_worker = None
+        try:
+            self._local_api.stop()
+        except Exception:
+            pass
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(15000)

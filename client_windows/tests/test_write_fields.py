@@ -12,12 +12,14 @@ from app.constants import (
     STATUS_DONE,
     STATUS_TODO,
     SYNC_SOURCE_CLIENT,
+    MonitorLogFields,
     TaskFields,
 )
 from app.feishu.repository import (
     build_complete_fields,
     build_create_fields,
     build_defer_fields,
+    build_monitor_log_fields,
     generate_external_id,
 )
 
@@ -96,6 +98,61 @@ class TestBuildDeferFields(unittest.TestCase):
         self.assertEqual(fields[TaskFields.DUE_AT], int(new_due.timestamp() * 1000))
         self.assertEqual(fields[TaskFields.DELAY_COUNT], 3)
         self.assertEqual(fields[TaskFields.STATUS], STATUS_TODO)
+
+
+class TestBuildMonitorLogFields(unittest.TestCase):
+    """娱乐监控日志字段构建（M4）。
+
+    重点回归：URL 列是飞书「超链接」字段，必须传 {"text","link"} 对象，
+    否则会报 1254068 URLFieldConvFail。
+    """
+
+    def setUp(self):
+        self.now = datetime(2026, 10, 7, 15, 30, 0)
+
+    def test_url_is_hyperlink_object(self):
+        fields = build_monitor_log_fields(
+            occurred_at=self.now,
+            duration_seconds=600,
+            url="bilibili.com",
+        )
+        value = fields[MonitorLogFields.URL]
+        self.assertIsInstance(value, dict)
+        self.assertEqual(value["text"], "bilibili.com")
+        self.assertEqual(value["link"], "https://bilibili.com")
+
+    def test_url_keeps_existing_scheme(self):
+        fields = build_monitor_log_fields(
+            occurred_at=self.now,
+            duration_seconds=60,
+            url="http://example.com/page",
+        )
+        self.assertEqual(fields[MonitorLogFields.URL]["link"], "http://example.com/page")
+
+    def test_url_omitted_when_empty(self):
+        fields = build_monitor_log_fields(
+            occurred_at=self.now, duration_seconds=60, url=""
+        )
+        self.assertNotIn(MonitorLogFields.URL, fields)
+
+    def test_basic_fields(self):
+        fields = build_monitor_log_fields(
+            occurred_at=self.now,
+            duration_seconds=2700,
+            process_name="chrome.exe",
+            window_title="哔哩哔哩",
+            url="bilibili.com",
+            notified=True,
+            notify_count=3,
+            closed=True,
+            note="L4 触发",
+        )
+        self.assertEqual(fields[MonitorLogFields.OCCURRED_AT], int(self.now.timestamp() * 1000))
+        self.assertEqual(fields[MonitorLogFields.DURATION], 2700)
+        self.assertTrue(fields[MonitorLogFields.NOTIFIED])
+        self.assertEqual(fields[MonitorLogFields.NOTIFY_COUNT], 3)
+        self.assertTrue(fields[MonitorLogFields.CLOSED])
+        self.assertEqual(fields[MonitorLogFields.NOTE], "L4 触发")
 
 
 if __name__ == "__main__":

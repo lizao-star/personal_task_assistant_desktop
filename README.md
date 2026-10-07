@@ -4,7 +4,7 @@
 
 > 一句话定位：**AI 帮我规划、拆解、提醒、监督、复盘**——不是「AI 帮我完成任务」。
 
-当前进度：**M3 已完成（客户端 DeepSeek 拆解 + 豆包 agent 手机端）；M4 待开始**。
+当前进度：**M4 已完成（娱乐监督 L4：全屏遮挡 + 强制关闭网页；番茄钟推后）**。
 
 ---
 
@@ -38,7 +38,10 @@
 - [x] **AI 拆解已有任务**：详情页点「AI 拆解此任务」，预览建议后一键采纳或忽略（M3）
 - [x] **置信度兜底**：AI 解析置信度低于阈值自动写入「收集箱」待确认；断网/Key 错误退化为只取标题，程序不崩（M3）
 - [ ] 手机端 AI 拆解（豆包 agent 方案，见 [docs/豆包agent轻量化方案.md](docs/豆包agent轻量化方案.md)，纯手动配置无需代码）
-- [ ] 娱乐监督与浏览器扩展（M4）
+- [x] **娱乐监督（M4）**：5 秒采样前台窗口 + 浏览器扩展上报；**黑名单命中（娱乐域名/标题/进程）才计时**，白名单豁免；L1 通知 → L2 语音 → L3 提醒 → L4 动作（全屏遮挡 / 强制关闭网页二选一）；会话结束聚合写飞书「娱乐监控日志表」
+- [x] **本地 API（M4）**：`127.0.0.1:8765` 接收扩展上报与下发关标签请求；不暴露公网
+- [x] **浏览器扩展（M4，MV3）**：5 秒上报域名/标题（仅当前聚焦标签）；关标签经 background service worker 执行 `chrome.tabs.remove`
+- [ ] 番茄钟（推到后续阶段，M4 范围内不做）
 - [ ] 飞书机器人（M5，可用豆包 agent 替代）
 
 ## 快速开始
@@ -81,6 +84,8 @@ copy config\.env.example config\.env
 
 如需 AI 建任务 / AI 拆解（M3），再到 [DeepSeek 开放平台](https://platform.deepseek.com/) 申请 API Key 并填入 `DEEPSEEK_API_KEY`；不填则 AI 按钮置灰，其余功能不受影响。
 
+如需娱乐监督聚合日志入库（M4），把 `FEISHU_MONITOR_LOG_TABLE_ID` 取消注释并填上飞书「娱乐监控日志表」的 `table=` 参数；不填则监督仍可运行（仅本地缓存，不入飞书）。
+
 ### 5. 验证连接（可选，不开界面）
 
 ```powershell
@@ -108,8 +113,8 @@ python run.py
 | AI 拆解       | 详情页点「AI 拆解此任务」→ 预览子任务/清单/建议 → 采纳写入或忽略                     |
 | 完成任务      | 选中行 → 点「完成」；状态与完成时间立即写入飞书                                      |
 | 延期任务      | 选中行 → 点「延期」，可选今晚 23:59 / 明天 18:00 / 自定义时间                        |
-| 暂停/恢复提醒 | 主窗口按钮或托盘菜单                                                                 |
-| 开机自启      | 托盘菜单勾选（写入当前用户注册表）                                                   |
+| 暂停/恢复提醒 | 主窗口按钮或托盘菜单（同时暂停娱乐监督，受 `pause_with_reminder` 控制）              |
+| 娱乐监督开关  | 托盘菜单「娱乐监督」勾选                                                             |
 | 关闭程序      | 托盘菜单「退出」（点窗口 × 只是隐藏到托盘）                                          |
 
 ### 离线队列与冲突
@@ -129,6 +134,15 @@ python run.py
 - `reminder.tts.engine`：语音引擎，当前支持 `pyttsx3`
 - `ai.confidence_threshold`：AI 解析置信度阈值，低于该值写入收集箱待确认，默认 0.6
 - `ai.timeout_seconds`：单次 AI 请求超时，默认 60 秒
+- `monitor.enabled`：娱乐监督总开关，默认 `true`
+- `monitor.sample_interval_seconds`：监督采样间隔，默认 5 秒
+- `monitor.grace_seconds`：容忍窗口（秒），默认 60；窗口内短暂切走不结束会话、切回不重复写日志；0 表示关闭容忍（切走即结束）。所有娱乐平台共用同一会话与计时器，切换平台不清零
+- `monitor.whitelist_titles` / `whitelist_domains`：白名单关键词，命中即不计时（优先于黑名单）
+- `monitor.blacklist_domains` / `blacklist_keywords` / `blacklist_processes`：娱乐黑名单，**必须命中才计时**；三者全空则监督不生效
+- `monitor.escalation.l1_minutes`~`l4_minutes`：四级升级阈值，默认 10/20/30/45 分钟
+- `monitor.l4_action`：L4 触发的动作，`overlay`（全屏遮罩）或 `kill_tab`（强制关闭网页）
+- `monitor.pause_with_reminder`：暂停提醒时是否同时暂停监督，默认 `true`
+- `monitor.local_api_port`：本地 API 端口，默认 8765（仅供浏览器扩展上报）
 
 ## 单元测试
 
@@ -143,7 +157,13 @@ python -m unittest discover -s tests -v
 - 常驻内存 < 150 MB，空闲 CPU < 1%
 - 自动同步默认 45 秒一次（飞书 API 有限流，不建议更短）
 
+## 浏览器扩展安装（M4 监督，可选）
+
+1. 打开 Edge 或 Chrome，访问 `edge://extensions` / `chrome://extensions`。
+2. 打开右上角「开发者模式」。
+3. 点「加载解压缩的扩展」，选择 `client_windows/extension` 目录。
+4. 扩展会自动连本地客户端（`http://127.0.0.1:8765/health`）；不装也能用监督，但只能基于前台窗口标题判断，不能精确关单个标签页（会降级为关整个浏览器窗口）。
+
 ## 下一步
 
-继续 **M4**：娱乐监督 + 浏览器扩展 + 番茄钟，见 [docs/路线图.md](docs/路线图.md)；
-手机端 AI 拆解按 [docs/豆包agent轻量化方案.md](docs/豆包agent轻量化方案.md) 手动配置豆包 agent 即可。
+继续 **M5**：飞书机器人（可用豆包 agent 替代，见 [docs/豆包agent轻量化方案.md](docs/豆包agent轻量化方案.md)）；番茄钟与日历时间块推到后续阶段，见 [docs/路线图.md](docs/路线图.md)。

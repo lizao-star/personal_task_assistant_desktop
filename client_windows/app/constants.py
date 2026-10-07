@@ -99,3 +99,38 @@ REMINDER_OFFSET_MINUTES = {
     "提前30分钟": 30,
     "提前10分钟": 10,
 }
+
+
+class MonitorLogFields:
+    """娱乐监控日志表字段名（必须与飞书「娱乐监控日志表」列名完全一致）。"""
+
+    OCCURRED_AT = "时间"
+    PROCESS_NAME = "进程名"
+    WINDOW_TITLE = "窗口标题"
+    URL = "URL"
+    DURATION = "持续时长"
+    NOTIFIED = "是否提醒"
+    NOTIFY_COUNT = "提醒次数"
+    CLOSED = "是否关闭"
+    NOTE = "备注"
+
+
+# ===== 监督升级级别（L1~L4） =====
+# 级别数字越小越温和；L4 为最高强度，触发遮挡或关网页
+MONITOR_LEVEL_NONE = 0
+MONITOR_LEVEL_L1 = 1  # 系统通知
+MONITOR_LEVEL_L2 = 2  # TTS 语音
+MONITOR_LEVEL_L3 = 3  # 飞书卡片（本期暂走系统通知 + 日志备注）
+MONITOR_LEVEL_L4 = 4  # 全屏遮挡 / 强制关闭网页
+
+# L4 执行的动作类型（与 settings.yaml monitor.l4_action 取值一致）
+MONITOR_ACTION_OVERLAY = "overlay"   # 全屏遮罩
+MONITOR_ACTION_KILL_TAB = "kill_tab"  # 强制关闭网页
+
+# 默认升级阈值（分钟），可被 settings.yaml monitor.escalation 覆盖
+DEFAULT_ESCALATION_MINUTES = {
+    MONITOR_LEVEL_L1: 10,
+    MONITOR_LEVEL_L2: 20,
+    MONITOR_LEVEL_L3: 30,
+    MONITOR_LEVEL_L4: 45,
+}

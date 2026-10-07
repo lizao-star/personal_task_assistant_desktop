@@ -40,3 +40,35 @@ ai:
   confidence_threshold: 0.6
   # 单次 AI 请求超时（秒）
   timeout_seconds: 60
+
+# 娱乐监督设置（M4）
+# 纯规则驱动，无 AI；5 秒采样前台窗口与扩展上报的域名
+monitor:
+  # 总开关：false 时监控引擎不启动
+  enabled: true
+  # 采样间隔（秒），项目约定不低于 5 秒
+  sample_interval_seconds: 5
+  # 容忍窗口（秒）：短暂切走（查资料/回消息）不结束会话，
+  # 窗口内切回继续累计、不重复写日志；0 表示关闭容忍（切走即结束）
+  grace_seconds: 60
+  # 进程/窗口标题白名单（命中则不视为娱乐，不计时）；白名单优先于黑名单
+  whitelist_titles: ["Word", "Excel", "PowerPoint", "PyCharm", "Visual Studio", "Code"]
+  # 域名白名单（扩展上报的域名命中则豁免）
+  whitelist_domains: ["feishu.cn", "github.com", "cnki.net", "scholar.google.com"]
+  # 娱乐黑名单：只有显式命中以下任一维度才计入娱乐时长。
+  # 三个列表都为空时监督不生效（避免任何窗口都被误判为娱乐）。
+  blacklist_domains: ["douyin.com", "bilibili.com", "tiktok.com", "youtube.com", "weibo.com", "zhihu.com", "xiaohongshu.com", "iqiyi.com", "youku.com", "twitch.tv"]
+  blacklist_keywords: ["抖音", "哔哩哔哩", "bilibili", "爱奇艺", "腾讯视频", "优酷", "小红书", "微博", "游戏"]
+  blacklist_processes: ["douyin.exe", "云·原神.exe", "yuanshen.exe", "steam.exe"]
+  # 升级阈值（分钟）：连续娱乐达到该时长依次触发 L1/L2/L3/L4
+  escalation:
+    l1_minutes: 10   # 系统通知
+    l2_minutes: 20   # TTS 语音
+    l3_minutes: 30   # 再次系统通知 + 日志备注
+    l4_minutes: 45   # 全屏遮挡 / 强制关闭网页
+  # L4 触发时执行的动作：overlay=全屏遮罩 | kill_tab=强制关闭网页
+  l4_action: "overlay"
+  # 暂停提醒期间是否同时暂停监督（与托盘「暂停提醒」联动）
+  pause_with_reminder: true
+  # 本地 API 端口（接收浏览器扩展上报与关标签页指令）
+  local_api_port: 8765

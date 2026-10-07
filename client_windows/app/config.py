@@ -37,6 +37,7 @@ class FeishuCredential:
     app_token: str
     task_table_id: str
     subtask_table_id: str = ""  # 可选：子任务表 table_id（M3 详情页展示子任务用）
+    monitor_log_table_id: str = ""  # 可选：娱乐监控日志表 table_id（M4 聚合写日志用）
 
     @property
     def is_ready(self) -> bool:
@@ -95,6 +96,7 @@ def load_config() -> AppConfig:
         app_token=os.getenv("FEISHU_APP_TOKEN", "").strip(),
         task_table_id=os.getenv("FEISHU_TASK_TABLE_ID", "").strip(),
         subtask_table_id=os.getenv("FEISHU_SUBTASK_TABLE_ID", "").strip(),
+        monitor_log_table_id=os.getenv("FEISHU_MONITOR_LOG_TABLE_ID", "").strip(),
     )
     # AI 配置：Key 从 .env 读，其余参数从 settings.yaml 读（可覆盖默认值）
     settings = _load_settings()

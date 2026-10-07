@@ -22,6 +22,7 @@ from ..feishu.client import FeishuClient
 from ..feishu.repository import (
     Task,
     build_subtask_fields,
+    create_monitor_log,
     create_subtask,
     create_task,
     find_by_external_id,
@@ -51,6 +52,7 @@ class SyncService:
         table_id: str,
         cache: LocalCache,
         subtask_table_id: str = "",
+        monitor_log_table_id: str = "",
     ):
         self._client = client
         self._app_token = app_token
@@ -58,6 +60,8 @@ class SyncService:
         self._cache = cache
         # 可选：子任务表 table_id，为空时跳过子任务拉取
         self._subtask_table_id = subtask_table_id
+        # 可选：娱乐监控日志表 table_id，为空时跳过日志推送（M4）
+        self._monitor_log_table_id = monitor_log_table_id
 
     # ------------------------------------------------------------------
     # 推送离线队列
@@ -86,6 +90,36 @@ class SyncService:
                 self._cache.delete_op(op.op_id)
                 success += 1
         return success, conflicts, last_error
+
+    # ------------------------------------------------------------------
+    # 推送娱乐监控日志（M4）
+    # ------------------------------------------------------------------
+    def push_monitor_logs(self) -> tuple[int, str | None]:
+        """把 pending_monitor_logs 队列推送到飞书「娱乐监控日志表」。
+
+        无冲突检测（日志是只新增不更新的聚合记录），建记录即删本地行。
+        表 ID 未配置时直接跳过（仅本地缓存）。
+        返回 (成功数, 最后一条错误消息)。
+        """
+        if not self._monitor_log_table_id:
+            return 0, None
+        success = 0
+        last_error: str | None = None
+        for item in self._cache.list_pending_monitor_logs():
+            fields = item.get("payload", {})
+            try:
+                create_monitor_log(
+                    self._client,
+                    self._app_token,
+                    self._monitor_log_table_id,
+                    fields,
+                )
+                self._cache.delete_monitor_log(int(item["log_id"]))
+                success += 1
+            except Exception as e:
+                last_error = str(e)
+                logger.warning("娱乐日志推送失败 log_id=%s: %s", item.get("log_id"), e)
+        return success, last_error
 
     def _push_one(self, op: PendingOp) -> tuple[bool, dict[str, Any] | None]:
         """推送单条 op。

@@ -16,3 +16,10 @@ winotify>=1.1.0
 
 # 离线中文语音（仅 Windows 使用；其他系统安装失败不影响其余功能）
 pyttsx3>=2.90
+
+# ===== M4 依赖 =====
+# 前台进程监控（跨平台；Windows 上取前台窗口用 pywin32）
+psutil>=5.9
+
+# Windows API：取前台窗口标题、EnumWindows 关闭娱乐窗口
+pywin32>=306 ; sys_platform == "win32"

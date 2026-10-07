@@ -95,6 +95,30 @@ class LocalCache:
             )
             """
         )
+        # 娱乐监督活跃会话（M4）：单行，记录当前正在进行的娱乐会话状态
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS monitor_session (
+                session_id   TEXT PRIMARY KEY,
+                level        INTEGER NOT NULL DEFAULT 0,
+                fired_count  INTEGER NOT NULL DEFAULT 0,
+                closed       INTEGER NOT NULL DEFAULT 0,
+                started_at   TEXT NOT NULL,
+                last_sample_at TEXT NOT NULL,
+                payload      TEXT NOT NULL
+            )
+            """
+        )
+        # 待推送的娱乐监控日志（M4）：会话结束入队，后台同步线程推送飞书日志表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_monitor_logs (
+                log_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload   TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -296,6 +320,131 @@ class LocalCache:
             (reminder_key, datetime.now().isoformat(timespec="seconds")),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # 娱乐监督会话（M4）
+    # ------------------------------------------------------------------
+    # 单活跃会话约定：表中只保留一行；新会话开始时先清空旧行。
+    MONITOR_SESSION_ID = "current"
+
+    def start_monitor_session(self, payload: dict[str, Any]) -> None:
+        """开始一次娱乐会话（清空旧会话）。payload 由调用方填充采样信息。"""
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute("DELETE FROM monitor_session")
+            self._conn.execute(
+                "INSERT INTO monitor_session"
+                "(session_id, level, fired_count, closed, started_at, last_sample_at, payload) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    self.MONITOR_SESSION_ID,
+                    0,
+                    0,
+                    0,
+                    now_iso,
+                    now_iso,
+                    json.dumps(payload, ensure_ascii=False, default=_json_default),
+                ),
+            )
+            self._conn.commit()
+
+    def load_monitor_session(self) -> dict[str, Any] | None:
+        """读取当前活跃会话，无则返回 None。返回字典包含状态字段与 payload。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT session_id, level, fired_count, closed, started_at, "
+                "last_sample_at, payload FROM monitor_session LIMIT 1"
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "session_id": row[0],
+            "level": int(row[1]),
+            "fired_count": int(row[2]),
+            "closed": bool(row[3]),
+            "started_at": row[4],
+            "last_sample_at": row[5],
+            "payload": json.loads(row[6]),
+        }
+
+    def update_monitor_session(
+        self,
+        *,
+        level: int | None = None,
+        fired_count: int | None = None,
+        closed: bool | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """更新当前会话状态字段（任一为 None 则保持原值）。"""
+        cur_session = self.load_monitor_session()
+        if cur_session is None:
+            return
+        new_level = cur_session["level"] if level is None else level
+        new_fired = cur_session["fired_count"] if fired_count is None else fired_count
+        new_closed = cur_session["closed"] if closed is None else closed
+        new_payload = (
+            cur_session["payload"] if payload is None else payload
+        )
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE monitor_session SET level=?, fired_count=?, closed=?, "
+                "last_sample_at=?, payload=? WHERE session_id=?",
+                (
+                    new_level,
+                    new_fired,
+                    1 if new_closed else 0,
+                    now_iso,
+                    json.dumps(new_payload, ensure_ascii=False, default=_json_default),
+                    self.MONITOR_SESSION_ID,
+                ),
+            )
+            self._conn.commit()
+
+    def end_monitor_session(self) -> dict[str, Any] | None:
+        """结束当前会话：读取并清空。返回原会话数据供调用方聚合写日志。"""
+        session = self.load_monitor_session()
+        if session is None:
+            return None
+        with self._lock:
+            self._conn.execute("DELETE FROM monitor_session")
+            self._conn.commit()
+        return session
+
+    def enqueue_monitor_log(self, payload: dict[str, Any]) -> int:
+        """把一次聚合好的娱乐会话日志入队，待后台同步线程推送到飞书。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO pending_monitor_logs(payload, created_at) VALUES(?,?)",
+                (
+                    json.dumps(payload, ensure_ascii=False, default=_json_default),
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_pending_monitor_logs(self) -> list[dict[str, Any]]:
+        """列出全部待推送的娱乐监控日志（按入队顺序）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT log_id, payload, created_at FROM pending_monitor_logs "
+                "ORDER BY log_id"
+            )
+            rows = cur.fetchall()
+        return [
+            {"log_id": row[0], "payload": json.loads(row[1]), "created_at": row[2]}
+            for row in rows
+        ]
+
+    def delete_monitor_log(self, log_id: int) -> None:
+        """推送成功后删除该日志行。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM pending_monitor_logs WHERE log_id=?", (log_id,)
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         """关闭数据库连接。"""
