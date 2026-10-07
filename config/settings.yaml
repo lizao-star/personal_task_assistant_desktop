@@ -33,3 +33,10 @@ reminder:
     engine: pyttsx3
     # 语速（pyttsx3 默认约 200）
     rate: 180
+
+# AI 设置（M3；Key 在 config/.env 的 DEEPSEEK_API_KEY，不写在这里）
+ai:
+  # 置信度阈值：AI 解析置信度低于该值时写入「收集箱」待人工确认，不自动定优先级
+  confidence_threshold: 0.6
+  # 单次 AI 请求超时（秒）
+  timeout_seconds: 60

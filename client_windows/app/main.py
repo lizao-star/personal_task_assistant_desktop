@@ -22,17 +22,21 @@ from typing import Any
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from .ai.provider import DeepSeekProvider
 from .config import DATA_DIR, load_config
 from .constants import STATUS_DONE, STATUS_TODO
 from .feishu.client import FeishuClient
 from .feishu.repository import (
     Task,
+    build_ai_breakdown_fields,
     build_complete_fields,
     build_create_fields,
     build_defer_fields,
     generate_external_id,
     get_overdue_tasks,
     get_today_tasks,
+    get_inbox_tasks,
+    group_subtasks,
 )
 from .services import autostart
 from .services.cache import LocalCache
@@ -68,7 +72,13 @@ class SyncWorker(QObject):
         try:
             c = self._credential
             client = FeishuClient(c.app_id, c.app_secret, timeout=self._timeout)
-            svc = SyncService(client, c.app_token, c.task_table_id, self._cache)
+            svc = SyncService(
+                client,
+                c.app_token,
+                c.task_table_id,
+                self._cache,
+                subtask_table_id=c.subtask_table_id,
+            )
             if self._full:
                 tasks = svc.full_pull()
                 self.succeeded.emit(tasks)
@@ -110,6 +120,20 @@ class AssistantApp(QObject):
         self.tray = TrayController(self.window)
         self.tray.show()
 
+        # ----- M3：AI 供应商（Key 未配置时保持 None，AI 功能置灰） -----
+        self._ai_conf = config.ai
+        self._ai_provider: DeepSeekProvider | None = None
+        if self._ai_conf.is_ready:
+            self._ai_provider = DeepSeekProvider(
+                self._ai_conf.api_key,
+                base_url=self._ai_conf.base_url,
+                model=self._ai_conf.model,
+                timeout=self._ai_conf.timeout_seconds,
+            )
+        self.window.set_ai_provider(
+            self._ai_provider, threshold=self._ai_conf.confidence_threshold
+        )
+
         # 同步线程相关
         self._thread: QThread | None = None
         self._worker: SyncWorker | None = None
@@ -131,6 +155,8 @@ class AssistantApp(QObject):
         self.window.create_requested.connect(self._on_create)
         self.window.complete_requested.connect(self._on_complete)
         self.window.defer_requested.connect(self._on_defer)
+        self.window.detail_requested.connect(self._on_detail)
+        self.window.breakdown_apply_requested.connect(self._on_breakdown_apply)
 
         # 托盘
         self.tray.show_action.triggered.connect(self._show_window)
@@ -240,7 +266,7 @@ class AssistantApp(QObject):
             title = c.get("title", "")
             op_id = int(c.get("op_id", 0))
             op_type = c.get("op_type", "")
-            action = "完成" if op_type == "complete" else "延期"
+            action = SyncService.OP_LABELS.get(op_type, op_type)
             btn = QMessageBox.question(
                 self.window,
                 "检测到云端变更",
@@ -271,10 +297,53 @@ class AssistantApp(QObject):
     # 写操作：先入队 + 乐观更新 + 后台推送
     # ------------------------------------------------------------------
     def _on_create(self, payload: dict) -> None:
-        """新建任务：入队并触发推送（不乐观更新，等拉取回来再显示）。"""
+        """新建任务：入队并触发推送（不乐观更新，等拉取回来再显示）。
+
+        M3 起 AI 建任务的 payload 会额外带 subtasks / low_confidence，
+        这两个键不进 build_create_fields，子任务在推送落表后一并写入。
+        """
+        subtasks = payload.pop("subtasks", [])
+        payload.pop("low_confidence", None)
         external_id = generate_external_id()
         fields = build_create_fields(external_id=external_id, **payload)
-        self._cache.enqueue_op("create", {"external_id": external_id, "fields": fields})
+        self._cache.enqueue_op(
+            "create",
+            {"external_id": external_id, "fields": fields, "subtasks": subtasks},
+        )
+        self._refresh_pending_label()
+        self.start_incremental_sync()
+
+    def _on_breakdown_apply(self, payload: dict) -> None:
+        """M3：采纳 AI 拆解建议——回填 AI拆解/检查清单/AI建议 + 写子任务。
+
+        与完成/延期一致：先入队（带冲突检测基准）+ 乐观更新本地缓存，
+        再由后台线程推送；AI 只给建议，写不写永远由用户点「采纳」决定。
+        """
+        record_id = payload.get("record_id", "")
+        task = self._find_cached(record_id)
+        if task is None:
+            return
+        subtasks = payload.get("subtasks") or []
+        fields = build_ai_breakdown_fields(
+            payload.get("ai_breakdown", ""),
+            payload.get("checklist", ""),
+            payload.get("advice", ""),
+        )
+        self._cache.enqueue_op(
+            "ai_breakdown",
+            {
+                "record_id": record_id,
+                "fields": fields,
+                "subtasks": subtasks,
+                "base_ms": task.modified_ms,
+                "title": task.title,
+            },
+        )
+        # 乐观更新：立即在详情数据上可见（子任务等同步拉取后出现）
+        task.ai_breakdown = payload.get("ai_breakdown", "")
+        task.checklist = payload.get("checklist", "")
+        self._cache.upsert_tasks([task])
+        self._render(self._cache.load_tasks())
         self._refresh_pending_label()
         self.start_incremental_sync()
 
@@ -325,6 +394,14 @@ class AssistantApp(QObject):
         self._refresh_pending_label()
         self.start_incremental_sync()
 
+    def _on_detail(self, record_id: str) -> None:
+        """查看任务详情：从缓存取任务与子任务，交给主窗口弹窗展示。"""
+        task = self._find_cached(record_id)
+        if task is None:
+            return
+        subtasks = group_subtasks(self._cache.load_subtasks(), record_id)
+        self.window.show_task_detail(task, subtasks)
+
     def _find_cached(self, record_id: str) -> Task | None:
         """从本地缓存中按 record_id 找任务。"""
         for t in self._cache.load_tasks():
@@ -340,10 +417,11 @@ class AssistantApp(QObject):
     # 渲染与提醒
     # ------------------------------------------------------------------
     def _render(self, tasks: list[Task]) -> None:
-        """计算优先级并渲染今日/逾期表格。"""
+        """计算优先级并渲染待办/逾期/收集箱表格。"""
         today_scored = rank_tasks(get_today_tasks(tasks))
         overdue_scored = rank_tasks(get_overdue_tasks(tasks))
-        self.window.render(today_scored, overdue_scored, datetime.now())
+        inbox_scored = rank_tasks(get_inbox_tasks(tasks))
+        self.window.render(today_scored, overdue_scored, inbox_scored, datetime.now())
 
     def _check_reminders(self) -> None:
         """定时提醒检查：基于最近一次缓存的数据。"""

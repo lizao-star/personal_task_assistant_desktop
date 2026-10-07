@@ -45,6 +45,19 @@ class TaskFields:
     UPDATED_AT = "修改时间"
 
 
+class SubtaskFields:
+    """子任务表字段名（必须与飞书「子任务表」列名完全一致）。"""
+
+    TITLE = "子任务名"
+    PARENT = "所属任务"
+    STATUS = "状态"
+    ORDER = "顺序"
+    ESTIMATE_MIN = "预计耗时"
+    DUE_AT = "截止时间"
+    COMPLETED_AT = "完成时间"
+    AI_HINT = "AI提示"
+
+
 # ===== 状态选项 =====
 STATUS_INBOX = "收集箱"
 STATUS_TODO = "待办"

@@ -21,9 +21,12 @@ logger = logging.getLogger(__name__)
 from ..feishu.client import FeishuClient
 from ..feishu.repository import (
     Task,
+    build_subtask_fields,
+    create_subtask,
     create_task,
     find_by_external_id,
     get_remote_modified_ms,
+    list_subtasks,
     list_tasks,
     to_task,
     update_task,
@@ -38,17 +41,23 @@ class SyncService:
     # 缓存中增量游标的键名
     CURSOR_KEY = "pull_cursor_ms"
 
+    # 冲突提示用：操作类型 -> 用户可读的动作名
+    OP_LABELS = {"complete": "完成", "defer": "延期", "ai_breakdown": "AI 拆解"}
+
     def __init__(
         self,
         client: FeishuClient,
         app_token: str,
         table_id: str,
         cache: LocalCache,
+        subtask_table_id: str = "",
     ):
         self._client = client
         self._app_token = app_token
         self._table_id = table_id
         self._cache = cache
+        # 可选：子任务表 table_id，为空时跳过子任务拉取
+        self._subtask_table_id = subtask_table_id
 
     # ------------------------------------------------------------------
     # 推送离线队列
@@ -89,17 +98,26 @@ class SyncService:
         if op_type == "create":
             external_id = payload.get("external_id", "")
             fields = payload.get("fields", {})
-            # 幂等：先按 external_id 查重，命中即视为成功
+            subtask_titles = payload.get("subtasks") or []
+            # 幂等：先按 external_id 查重，命中即复用已存在的记录
+            # （崩溃/中断后重推时，主任务已存在但子任务可能未落表，仍需补写）
             if external_id:
                 existing = find_by_external_id(
                     self._client, self._app_token, self._table_id, external_id
                 )
                 if existing is not None:
+                    if existing.record_id and subtask_titles:
+                        self._create_subtasks_safe(existing.record_id, subtask_titles)
                     return True, None
-            create_task(self._client, self._app_token, self._table_id, fields)
+            created = create_task(
+                self._client, self._app_token, self._table_id, fields
+            )
+            # M3：AI 建任务可携带子任务，主任务落表后立刻写入并关联
+            if created.record_id and subtask_titles:
+                self._create_subtasks_safe(created.record_id, subtask_titles)
             return True, None
 
-        if op_type in ("complete", "defer"):
+        if op_type in ("complete", "defer", "ai_breakdown"):
             record_id = payload.get("record_id", "")
             fields = payload.get("fields", {})
             base_ms = int(payload.get("base_ms", 0))
@@ -118,14 +136,45 @@ class SyncService:
                         "record_id": record_id,
                     }
             update_task(self._client, self._app_token, self._table_id, record_id, fields)
+            # M3：AI 拆解采纳时同步写入子任务（失败只记日志，主字段已更新视为成功）
+            if op_type == "ai_breakdown":
+                subtask_titles = payload.get("subtasks") or []
+                if subtask_titles:
+                    self._create_subtasks_safe(record_id, subtask_titles)
             return True, None
 
         # 未知类型：直接丢弃，避免阻塞队列
         return True, None
 
+    def _create_subtasks_safe(self, parent_record_id: str, titles: list[str]) -> None:
+        """写入子任务并关联主任务；子任务表未配置或写入失败都不抛出。"""
+        if not self._subtask_table_id:
+            logger.warning("子任务表未配置，跳过 %d 条子任务写入", len(titles))
+            return
+        for fields in build_subtask_fields(parent_record_id, titles):
+            try:
+                create_subtask(
+                    self._client, self._app_token, self._subtask_table_id, fields
+                )
+            except Exception as e:
+                logger.warning("子任务写入失败（不影响主任务）: %s", e)
+
     # ------------------------------------------------------------------
     # 拉取
     # ------------------------------------------------------------------
+    def _pull_subtasks(self) -> None:
+        """全量拉取子任务表并替换本地缓存。
+
+        子任务只是详情展示用，拉取失败不影响任务同步；未配置表 ID 时跳过。
+        """
+        if not self._subtask_table_id:
+            return
+        try:
+            subtasks = list_subtasks(self._client, self._app_token, self._subtask_table_id)
+            self._cache.replace_subtasks(subtasks)
+        except Exception as e:
+            logger.warning("子任务表拉取失败（不影响任务同步）: %s", e)
+
     def full_pull(self) -> list[Task]:
         """全量拉取并重建本地缓存。返回最新任务列表。"""
         tasks = list_tasks(self._client, self._app_token, self._table_id)
@@ -133,6 +182,7 @@ class SyncService:
         # 重置增量游标为本次拉到的最大修改时间
         cursor = max((t.modified_ms for t in tasks), default=0)
         self._cache.set_meta(self.CURSOR_KEY, str(cursor))
+        self._pull_subtasks()
         return tasks
 
     def incremental_pull(self) -> list[Task]:
@@ -165,4 +215,6 @@ class SyncService:
             self._cache.upsert_tasks(changed)
             new_cursor = max(cursor, max(t.modified_ms for t in changed))
             self._cache.set_meta(self.CURSOR_KEY, str(new_cursor))
+        # 子任务表小，每次同步都全量刷一遍
+        self._pull_subtasks()
         return self._cache.load_tasks()

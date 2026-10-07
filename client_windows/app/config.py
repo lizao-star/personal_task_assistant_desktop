@@ -36,6 +36,7 @@ class FeishuCredential:
     app_secret: str
     app_token: str
     task_table_id: str
+    subtask_table_id: str = ""  # 可选：子任务表 table_id（M3 详情页展示子任务用）
 
     @property
     def is_ready(self) -> bool:
@@ -44,11 +45,28 @@ class FeishuCredential:
 
 
 @dataclass(frozen=True)
+class AIConfig:
+    """DeepSeek 接入配置（M3）。Key 只放 config/.env，绝不入库。"""
+
+    api_key: str = ""
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-chat"
+    confidence_threshold: float = 0.6  # 低于该值写入收集箱待人工确认
+    timeout_seconds: int = 60
+
+    @property
+    def is_ready(self) -> bool:
+        """是否已配置 Key（决定 AI 功能是否可用）。"""
+        return bool(self.api_key)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """应用完整配置。"""
 
     credential: FeishuCredential
     settings: dict[str, Any]
+    ai: AIConfig
 
 
 def _load_settings() -> dict[str, Any]:
@@ -76,5 +94,16 @@ def load_config() -> AppConfig:
         app_secret=os.getenv("FEISHU_APP_SECRET", "").strip(),
         app_token=os.getenv("FEISHU_APP_TOKEN", "").strip(),
         task_table_id=os.getenv("FEISHU_TASK_TABLE_ID", "").strip(),
+        subtask_table_id=os.getenv("FEISHU_SUBTASK_TABLE_ID", "").strip(),
     )
-    return AppConfig(credential=credential, settings=_load_settings())
+    # AI 配置：Key 从 .env 读，其余参数从 settings.yaml 读（可覆盖默认值）
+    settings = _load_settings()
+    ai_settings = settings.get("ai", {})
+    ai_conf = AIConfig(
+        api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
+        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip(),
+        model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip(),
+        confidence_threshold=float(ai_settings.get("confidence_threshold", 0.6)),
+        timeout_seconds=int(ai_settings.get("timeout_seconds", 60)),
+    )
+    return AppConfig(credential=credential, settings=settings, ai=ai_conf)

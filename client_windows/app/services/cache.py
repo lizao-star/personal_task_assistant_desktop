@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..feishu.repository import Task
+from ..feishu.repository import SubTask, Task
 
 
 @dataclass
@@ -82,6 +82,16 @@ class LocalCache:
                 payload    TEXT NOT NULL,
                 force      INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        # 子任务快照（M3）：详情对话框展示用，每次同步全量替换
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subtask_cache (
+                record_id  TEXT PRIMARY KEY,
+                payload    TEXT NOT NULL,
+                cached_at  TEXT NOT NULL
             )
             """
         )
@@ -155,6 +165,43 @@ class LocalCache:
                 data[key] = datetime.fromisoformat(value) if value else None
             tasks.append(Task(**data))
         return tasks
+
+    # ------------------------------------------------------------------
+    # 子任务缓存（M3）
+    # ------------------------------------------------------------------
+    def replace_subtasks(self, subtasks: list[SubTask]) -> None:
+        """用最新子任务列表整体替换本地快照（子任务表小，不做增量）。"""
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM subtask_cache")
+            cur.executemany(
+                "INSERT INTO subtask_cache(record_id, payload, cached_at) VALUES (?,?,?)",
+                [
+                    (
+                        sub.record_id,
+                        json.dumps(asdict(sub), ensure_ascii=False, default=_json_default),
+                        now_iso,
+                    )
+                    for sub in subtasks
+                ],
+            )
+            self._conn.commit()
+
+    def load_subtasks(self) -> list[SubTask]:
+        """读取本地缓存的全部子任务。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT payload FROM subtask_cache")
+            rows = cur.fetchall()
+        subtasks: list[SubTask] = []
+        for (payload,) in rows:
+            data = json.loads(payload)
+            # datetime 字段从 ISO 字符串还原
+            for key in ("due_at", "completed_at"):
+                value = data.get(key)
+                data[key] = datetime.fromisoformat(value) if value else None
+            subtasks.append(SubTask(**data))
+        return subtasks
 
     # ------------------------------------------------------------------
     # 离线操作队列（M2）

@@ -90,15 +90,15 @@ Authorization: Bearer {tenant_access_token}
 
 ### 2.2 字段类型与返回形态
 
-| 飞书字段类型 | OpenAPI 返回形态                             | 解析函数             |
-| ------------ | -------------------------------------------- | -------------------- |
-| 文本         | `[{"type":"text","text":"..."}]`             | `parse_text`         |
-| 单选         | `"P1"`                                       | `parse_select`       |
-| 多选         | `["论文","阅读"]`                            | `parse_multi_select` |
-| 数字         | `90`                                         | `parse_number`       |
-| 复选框       | `true`                                       | 直接布尔转换         |
-| 日期         | `1760006340000`（**毫秒时间戳**）            | `parse_datetime`     |
-| 关联         | `["recXXXX"]` 或 `{"link_record_ids":[...]}` | `parse_links`        |
+| 飞书字段类型 | OpenAPI 返回形态                                                                              | 解析函数             |
+| ------------ | --------------------------------------------------------------------------------------------- | -------------------- |
+| 文本         | `[{"type":"text","text":"..."}]`                                                              | `parse_text`         |
+| 单选         | `"P1"`                                                                                        | `parse_select`       |
+| 多选         | `["论文","阅读"]`                                                                             | `parse_multi_select` |
+| 数字         | `90`                                                                                          | `parse_number`       |
+| 复选框       | `true`                                                                                        | 直接布尔转换         |
+| 日期         | `1760006340000`（**毫秒时间戳**）                                                             | `parse_datetime`     |
+| 关联         | `["recXXXX"]`、`{"link_record_ids":[...]}` 或 `[{"record_ids":[...],"text":...}]`（较新版本） | `parse_links`        |
 
 解析实现：[repository.py](../client_windows/app/feishu/repository.py)
 
@@ -120,6 +120,8 @@ Authorization: Bearer {tenant_access_token}
 | depends_on     | 依赖任务       |
 | reminder_rules | 提醒规则       |
 | description    | 描述           |
+| ai_breakdown   | AI拆解（M3）   |
+| checklist      | 检查清单（M3） |
 | external_id    | 外部ID（M2）   |
 | completed_at   | 完成时间       |
 | modified_at    | 修改时间（M2） |
@@ -187,18 +189,47 @@ Authorization: Bearer {tenant_access_token}
 
 主要用于**冲突检测**：推送前先读一次云端 `修改时间`，与本地缓存的基准值比较。
 
+### 2.8 子任务表字段映射（M3 新增）
+
+客户端详情对话框展示子任务。`SubTask` 模型与解析同样在 [repository.py](../client_windows/app/feishu/repository.py)，
+字段名常量为 `SubtaskFields`（[constants.py](../client_windows/app/constants.py)）。
+
+| 本地 SubTask 属性 | 飞书字段名 | 说明                             |
+| ----------------- | ---------- | -------------------------------- |
+| title             | 子任务名   |                                  |
+| parent_record_id  | 所属任务   | 关联字段，取第一个 record_id     |
+| status            | 状态       | 待办/进行中/已完成/取消          |
+| order             | 顺序       | 展示时按顺序升序                 |
+| estimate_min      | 预计耗时   |                                  |
+| due_at            | 截止时间   |                                  |
+| completed_at      | 完成时间   |                                  |
+| ai_hint           | AI提示     | 详情中悬停子任务行时作为提示展示 |
+
+拉取方式：每次同步（全量与增量）都对子任务表做一次**全量 list**（子任务量小，不做增量游标），
+结果整体替换进 SQLite 的 `subtask_cache` 表。`FEISHU_SUBTASK_TABLE_ID` 未配置时自动跳过；
+拉取失败只记日志，不影响任务同步。
+
 ---
 
 ## 3. 筛选规则（M1 在客户端本地完成）
 
 为避免飞书 `filter` 语法与中文编码问题，M1 拉取全表后在本地筛选：
 
-| 视图     | 规则                                           |
-| -------- | ---------------------------------------------- |
-| 今日待办 | `截止时间` 为今天 且 `状态 ∉ {已完成, 已取消}` |
-| 逾期任务 | `截止时间 < 现在` 且 `状态 ∉ {已完成, 已取消}` |
+| 视图     | 规则                                                                      |
+| -------- | ------------------------------------------------------------------------- |
+| 待办任务 | `状态 ∉ {已完成, 已取消, 收集箱}` 且（`无截止时间` 或 `截止时间 ≥ 现在`） |
+| 逾期任务 | `截止时间 < 现在` 且 `状态 ∉ {已完成, 已取消, 收集箱}`                    |
+| 收集箱   | `状态 == 收集箱`                                                          |
 
-实现：`repository.get_today_tasks()` / `get_overdue_tasks()`
+三个视图互斥（同一任务只会出现在一个视图里），合起来恰好覆盖全部未结束任务：
+没有截止时间的任务归入待办任务，已过截止时间的任务归入逾期任务，
+状态为「收集箱」的任务（无论是否有截止时间）只出现在收集箱区——
+用户一旦把状态改为「待办/进行中/等待」等，下次同步会自动从收集箱中移除。
+
+待办列表按优先级分数降序排序，默认只显示前 5 个最重要的任务，
+其余通过「展开全部」按钮查看。
+
+实现：`repository.get_today_tasks()` / `get_overdue_tasks()` / `get_inbox_tasks()`
 
 ---
 
@@ -280,7 +311,7 @@ CREATE TABLE pending_ops (
 
 create：
 ```json
-{"external_id": "win-abc123", "fields": { ...build_create_fields 的产物... }}
+{"external_id": "win-abc123", "fields": { ...build_create_fields 的产物... }, "subtasks": ["步骤1", "步骤2"]}
 ```
 
 complete / defer：
@@ -288,15 +319,21 @@ complete / defer：
 {"record_id": "recXXX", "fields": {...}, "base_ms": 1759824000000, "title": "任务名"}
 ```
 
+ai_breakdown（M3，采纳 AI 拆解）：
+```json
+{"record_id": "recXXX", "fields": {...AI拆解/检查清单/AI建议...}, "subtasks": ["步骤1"], "base_ms": 1759824000000, "title": "任务名"}
+```
+
 `base_ms` 是入队时该任务在本地缓存的 `modified_ms`（云端最后修改时间），用于冲突检测。
 
 ### 幂等策略
 
-| 操作     | 幂等机制                                                                                           |
-| -------- | -------------------------------------------------------------------------------------------------- |
-| create   | 推送前按 `外部ID` 调 `search_records` 查重，命中即视为成功（说明上次推送已成功但客户端没收到响应） |
-| complete | `PUT` 本身幂等；状态/完成时间覆盖写，无副作用                                                      |
-| defer    | 同上                                                                                               |
+| 操作         | 幂等机制                                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------- |
+| create       | 推送前按 `外部ID` 调 `search_records` 查重，命中即复用已存在记录，并对其**补写**本次携带的子任务（幂等重推不重复建主任务，但子任务不会丢） |
+| complete     | `PUT` 本身幂等；状态/完成时间覆盖写，无副作用                                                                  |
+| defer        | 同上                                                                                                          |
+| ai_breakdown | 同上（`base_ms` 冲突检测 + 覆盖写 AI拆解/检查清单/AI建议 三字段后写入子任务）                                  |
 
 ### 冲突检测
 
@@ -318,9 +355,9 @@ complete / defer：
 ### 流程
 
 ```
-手动「立即同步」/ 启动时        →  full_pull（list_tasks + replace_tasks + 重置游标）
+手动「立即同步」/ 启动时        →  full_pull（list_tasks + replace_tasks + 重置游标 + 子任务全量刷）
 45s 定时器 / 写操作触发         →  drain_queue + incremental_pull
-                                     （search 修改时间 > cursor）
+                                     （search 修改时间 > cursor + 子任务全量刷）
                                      失败 / 无游标 → 回退 full_pull
 ```
 
@@ -328,10 +365,76 @@ complete / defer：
 
 ---
 
-## 9. M3 及后续将新增的接口（预告，当前未实现）
+## 9. AI 模块（M3 新增）
+
+### 调用链
+
+```
+UI（AI 建任务 / 详情页 AI 拆解按钮）
+    │  QThread（AIInvoker，界面线程不做 IO）
+    ▼
+parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
+    │
+    ├─ prompts.py   构造系统/用户提示词（含当前时间，硬编码学术诚信红线）
+    └─ provider.py  DeepSeekProvider → POST {base_url}/chat/completions
+                    model=deepseek-chat，response_format=json_object，temperature=0.2
+```
+
+- Key 从 `config/.env` 的 `DEEPSEEK_API_KEY` 读取，不入库、不打日志；
+- 超时默认 60 秒（`settings.yaml ai.timeout_seconds`），可被 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 覆盖；
+- **成本控制**：只在「AI 建任务 / 手动点 AI 拆解」时调用，无任何定时轮询；
+- 每次调用记录 token 用量（日志 + 供应商累计计数 + 界面展示）。
+
+### 输出契约（JSON Schema，对齐设计总纲 5.4）
+
+```json
+{
+  "title": "交高数作业 第三章习题1-10",
+  "priority": "P1",
+  "task_type": "作业",
+  "due_at": "2026-10-08T18:00:00+08:00",
+  "estimate_min": 90,
+  "energy": "中",
+  "tags": ["数学"],
+  "subtasks": ["复习第三章", "完成习题1-5"],
+  "checklist": ["核对答案"],
+  "confidence": 0.85
+}
+```
+
+拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`。
+
+### 校验与容错（parser.py）
+
+| 环节      | 策略                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------- |
+| JSON 提取 | 兼容剥离 Markdown 围栏；顶层非对象报错                                                                              |
+| 字段钳制  | priority/type/energy 非法值回落默认（P2/其他/空）；estimate 钳 0~1440；confidence 钳 0~1                            |
+| due_at    | 支持 ISO 8601（带时区转本地）与 `YYYY-MM-DD[ HH:MM]`；解析不了置 None                                               |
+| 失败重试  | 网络错误与 Schema 校验失败都重试 1 次                                                                               |
+| 兜底      | 解析两次失败 → `title_only_draft`（只取标题、confidence=0、写入收集箱），程序不崩；拆解无规则兜底，失败直接提示用户 |
+
+### 置信度策略
+
+`confidence < ai.confidence_threshold（默认 0.6）` 时：
+
+- 状态写「**收集箱**」并在 UI 红色横幅提示待人工确认；
+- 优先级**不采纳 AI 判断**，强制回落 P2。
+
+### 写回路径
+
+- **AI 建任务**：与手动新建同链路（离线队列 `create` op）；payload 额外携带 `subtasks`，推送阶段主任务落表后由 `_create_subtasks_safe` 写入子任务表并按「所属任务」关联（子任务表未配置/写入失败仅记日志，不影响主任务）。
+- **AI 拆解采纳**：新队列 op `ai_breakdown`（复用完成/延期的冲突检测基准 `base_ms`），推送时更新 `AI拆解/检查清单/AI建议` 三字段并写子任务。
+- AI 只产出建议文本，**绝不自动改任务状态**；采纳与否由用户点击决定。
+
+实现：[ai/provider.py](../client_windows/app/ai/provider.py)、[ai/prompts.py](../client_windows/app/ai/prompts.py)、[ai/parser.py](../client_windows/app/ai/parser.py)、[services/sync.py](../client_windows/app/services/sync.py)
+
+---
+
+## 10. M4 及后续将新增的接口（预告，当前未实现）
 
 - 批量接口：`.../records/batch_create`、`batch_update`
 - 发送消息：`POST /open-apis/im/v1/messages`
 - 卡片回调：事件订阅 `card.action.trigger`
-- AI 解析：DeepSeek Chat Completion（M3）
-- 自建服务端 REST：`/tasks`、`/sync/changes`、`/ai/parse` 等（M6）
+- 本地监控上报 API：`POST http://127.0.0.1:8765/report`（M4）
+- 自建服务端 REST：`/tasks`、`/sync/changes`（M6）
