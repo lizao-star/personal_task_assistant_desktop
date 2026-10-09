@@ -551,3 +551,26 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 - 时长注入：构造参数 `focus_seconds` / `rest_seconds`，读自 `settings.yaml` 的 `pomodoro.focus_minutes`（默认 25）与 `pomodoro.rest_minutes`（默认 5），分钟 × 60 注入。
 - 入口：仅托盘菜单「开始/停止番茄钟」（`tray.pomodoro_action`）；重启后状态不保留。
 - 后续扩展位（本期未做）：绑定任务累计「实际耗时」、每 4 个番茄的长休息、休息期豁免监督。
+
+## 13. 任务表格选中与操作目标（缺陷修复）
+
+**现象**：在待办表残留选中（如启动时同步后 `currentRow` 停在待办首行）的情况下，
+点击「逾期任务2」再点「完成」，实际被标记完成的却是「金融经济学作业」。
+
+**根因**：`TaskTable.currentRow()` 表示「当前单元格」而非「是否选中」，未被选中时
+仍会保留旧行号；且 Qt 的 `SingleSelection` 只在**同一张表内**互斥，三张任务表格
+（待办/逾期/收集箱）的选中状态互不影响。原 `_current_selected_record_id()` 按
+「待办 → 逾期 → 收集箱」固定优先级取值，于是待办表的残留行永远抢占逾期表的选中。
+
+**修复**（`app/ui/main_window.py`）：
+
+1. `TaskTable.selected_record_id()` 增加 `selectionModel().isRowSelected(row)` 校验，
+   行未被真正选中时返回空串；
+2. `_current_selected_record_id()` 改为以**用户最后点击的表格**（`_active_table`）
+   为准，无有效选中时再按待办/逾期/收集箱顺序兜底；
+3. 新增 `_on_table_focused()`：点击某表时记录为活动表，并 `clearSelection()` 清除
+   其余两表的选中，从源头杜绝跨表残留；
+4. `TaskTable.render()` 填充前先 `clearSelection()`——重渲染后行内容已变，
+   残留行号可能指向另一条任务。
+
+回归测试：`tests/test_main_window_selection.py`（8 个用例）。

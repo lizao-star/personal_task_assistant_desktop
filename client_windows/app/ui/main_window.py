@@ -62,6 +62,8 @@ class TaskTable(QTableWidget):
 
     def render(self, scored_tasks: list[tuple[Task, float]]) -> None:
         """用打分后的任务列表填充表格。"""
+        # 重新填充前清除选中：行内容会随之变化，残留行号可能指向另一条任务
+        self.clearSelection()
         self.setRowCount(len(scored_tasks))
         self._row_record_ids = [task.record_id for task, _ in scored_tasks]
         for row, (task, score) in enumerate(scored_tasks):
@@ -77,8 +79,15 @@ class TaskTable(QTableWidget):
                 self.setItem(row, col, item)
 
     def selected_record_id(self) -> str:
-        """当前选中行的 record_id；未选中返回空串。"""
-        return self.selected_record_id_from_row(self.currentRow())
+        """当前选中行的 record_id；未选中返回空串。
+
+        currentRow() 表示「当前单元格」而非「是否选中」，未被选中时也可能
+        保留旧行号，因此必须再确认该行确实处于选中状态，避免操作错行。
+        """
+        row = self.currentRow()
+        if row < 0 or not self.selectionModel().isRowSelected(row):
+            return ""
+        return self.selected_record_id_from_row(row)
 
     def selected_record_id_from_row(self, row: int) -> str:
         """指定行的 record_id；越界返回空串。"""
@@ -142,6 +151,8 @@ class MainWindow(QWidget):
         self._ai_threshold = 0.6
         # 最近一次渲染的任务（record_id -> Task），供详情查看
         self._rendered_tasks: dict[str, Task] = {}
+        # 用户最后交互的任务表格，供「完成/延期/详情」定位操作目标
+        self._active_table: TaskTable | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -225,6 +236,9 @@ class MainWindow(QWidget):
         # 双击任务行打开详情
         self.today_table.cellDoubleClicked.connect(self._on_row_double_clicked)
         self.overdue_table.cellDoubleClicked.connect(self._on_row_double_clicked)
+        # 记录最后交互的表格，避免跨表残留选中导致操作错行
+        self.today_table.cellClicked.connect(self._on_table_focused)
+        self.overdue_table.cellClicked.connect(self._on_table_focused)
 
         # ===== 收集箱区（状态为「收集箱」的任务，未排期，占可用高度约 25%） =====
         inbox_header = QHBoxLayout()
@@ -236,6 +250,7 @@ class MainWindow(QWidget):
         self.inbox_table = TaskTable()
         layout.addWidget(self.inbox_table, stretch=1)
         self.inbox_table.cellDoubleClicked.connect(self._on_row_double_clicked)
+        self.inbox_table.cellClicked.connect(self._on_table_focused)
 
     # ------------------------------------------------------------------
     # 对外接口
@@ -370,14 +385,34 @@ class MainWindow(QWidget):
             self.create_requested.emit(dlg.result_dict())
 
     def _current_selected_record_id(self) -> str:
-        """优先取待办表选中行，其次逾期表，再次收集箱表。"""
-        rid = self.today_table.selected_record_id()
-        if rid:
-            return rid
-        rid = self.overdue_table.selected_record_id()
-        if rid:
-            return rid
-        return self.inbox_table.selected_record_id()
+        """取当前操作目标的 record_id。
+
+        三张表格的选中状态互不影响（Qt 的单选只在本表内生效），因此不能按
+        固定优先级取，否则会拿到「其他表里残留的旧选中行」。改为以用户最后
+        交互的那张表为准，该表无有效选中时再按待办/逾期/收集箱顺序兜底。
+        """
+        if self._active_table is not None:
+            rid = self._active_table.selected_record_id()
+            if rid:
+                return rid
+        for table in (self.today_table, self.overdue_table, self.inbox_table):
+            rid = table.selected_record_id()
+            if rid:
+                return rid
+        return ""
+
+    def _on_table_focused(self, _row: int, _col: int) -> None:
+        """记录用户最后交互的表格，并清除其他表格的选中。
+
+        清除其他表选中可避免「待办表残留行」在用户操作逾期表时被误当作目标。
+        """
+        table = self.sender()
+        if not isinstance(table, TaskTable):
+            return
+        self._active_table = table
+        for other in (self.today_table, self.overdue_table, self.inbox_table):
+            if other is not table:
+                other.clearSelection()
 
     def _on_detail(self) -> None:
         """详情按钮：对当前选中行发出查看详情信号。"""
