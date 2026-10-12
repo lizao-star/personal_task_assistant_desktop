@@ -249,6 +249,6 @@ class SyncService:
             self._cache.upsert_tasks(changed)
             new_cursor = max(cursor, max(t.modified_ms for t in changed))
             self._cache.set_meta(self.CURSOR_KEY, str(new_cursor))
-        # 子任务表小，每次同步都全量刷一遍
-        self._pull_subtasks()
+            # 只有任务有变更时才顺带刷子任务表（减少无谓的飞书请求）
+            self._pull_subtasks()
         return self._cache.load_tasks()

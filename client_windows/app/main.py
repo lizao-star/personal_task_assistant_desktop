@@ -73,10 +73,10 @@ class SyncWorker(QObject):
     conflicts = Signal(list)            # list[dict]：冲突项
     push_error = Signal(str)            # 推送失败时透传给 UI 提示
 
-    def __init__(self, credential, timeout: int, cache: LocalCache, full: bool):
+    def __init__(self, feishu_client, credential, cache: LocalCache, full: bool):
         super().__init__()
+        self._client = feishu_client
         self._credential = credential
-        self._timeout = timeout
         self._cache = cache
         self._full = full
 
@@ -85,9 +85,10 @@ class SyncWorker(QObject):
         """线程入口：先推送后拉取。"""
         try:
             c = self._credential
-            client = FeishuClient(c.app_id, c.app_secret, timeout=self._timeout)
+            # 复用主线程创建的 FeishuClient（token 缓存 + 连接池），
+            # 避免每次同步都重新申请 token 和握手。
             svc = SyncService(
-                client,
+                self._client,
                 c.app_token,
                 c.task_table_id,
                 self._cache,
@@ -222,6 +223,14 @@ class AssistantApp(QObject):
         sync_cfg = self._settings.get("sync", {})
         interval = int(sync_cfg.get("interval_seconds", 45))
         self._timeout = int(sync_cfg.get("request_timeout_seconds", 10))
+        # 复用单个 FeishuClient：token 缓存 2 小时 + HTTP 连接池，
+        # 避免每次同步都重建客户端（省 1 次 token 请求 + 多次握手）。
+        if not hasattr(self, "_feishu_client") or self._feishu_client is None:
+            self._feishu_client = FeishuClient(
+                self._credential.app_id,
+                self._credential.app_secret,
+                timeout=self._timeout,
+            )
 
         self.sync_timer = QTimer(self)
         self.sync_timer.setInterval(interval * 1000)
@@ -272,7 +281,7 @@ class AssistantApp(QObject):
 
         self.window.set_syncing(True)
         self._thread = QThread()
-        self._worker = SyncWorker(self._credential, self._timeout, self._cache, full)
+        self._worker = SyncWorker(self._feishu_client, self._credential, self._cache, full)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)

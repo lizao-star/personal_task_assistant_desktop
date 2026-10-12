@@ -40,13 +40,15 @@ class FeishuClient:
         self._token: str = ""
         self._token_expire_at: float = 0.0
         self._token_lock = threading.Lock()
+        # HTTP 连接池：复用 TCP+TLS 连接，避免每次请求都重新握手
+        self._session = requests.Session()
 
     # ------------------------------------------------------------------
     # token 管理
     # ------------------------------------------------------------------
     def _request_token(self) -> str:
         """向飞书申请新的 tenant_access_token。"""
-        resp = requests.post(
+        resp = self._session.post(
             self.BASE_URL + self.TOKEN_PATH,
             json={"app_id": self._app_id, "app_secret": self._app_secret},
             timeout=self._timeout,
@@ -80,7 +82,7 @@ class FeishuClient:
     ) -> dict[str, Any]:
         """发起单次请求，返回解析后的 JSON。"""
         headers = {"Authorization": f"Bearer {self.get_token()}"}
-        resp = requests.request(
+        resp = self._session.request(
             method,
             url,
             headers=headers,
@@ -142,8 +144,8 @@ class FeishuClient:
                 else:
                     raise
 
-            # 指数退避
-            time.sleep(2**attempt)
+            # 指数退避（0.5/1/2 秒，比原 1/2/4 更快恢复）
+            time.sleep(0.5 * (2 ** attempt))
 
         # 理论上走不到这里
         raise last_error or RuntimeError("请求失败，且无可用错误信息")
