@@ -84,5 +84,59 @@ class CurrentSelectionTargetTest(unittest.TestCase):
         self.assertEqual(self.window._current_selected_record_id(), "")
 
 
+class DoubleClickEditTest(unittest.TestCase):
+    """双击任务行应打开编辑对话框并发出 edit_requested 信号（M5）。"""
+
+    def setUp(self):
+        self.window = MainWindow()
+        self.overdue = make_task("overdue-2", "逾期任务2")
+        self.window.render([], [(self.overdue, 1.0)], [])
+        self.emitted: list[dict] = []
+        self.window.edit_requested.connect(self.emitted.append)
+
+    def tearDown(self):
+        self.window.close()
+
+    def test_double_click_emits_edit(self):
+        """双击后若对话框返回变更，应带 record_id + changes 发信号。"""
+        from unittest.mock import patch
+
+        fake = _FakeEditDialog(changes={"title": "改后的标题"})
+        with patch(
+            "app.ui.main_window.EditTaskDialog", return_value=fake
+        ):
+            # 通过信号触发，保证槽内 self.sender() 能拿到表格
+            self.window.overdue_table.cellDoubleClicked.emit(0, 0)
+        self.assertEqual(len(self.emitted), 1)
+        self.assertEqual(self.emitted[0]["record_id"], "overdue-2")
+        self.assertEqual(self.emitted[0]["changes"], {"title": "改后的标题"})
+
+    def test_double_click_no_changes_no_signal(self):
+        """未改动任何字段时不应发信号，避免无谓写回。"""
+        from unittest.mock import patch
+
+        fake = _FakeEditDialog(changes={})
+        with patch(
+            "app.ui.main_window.EditTaskDialog", return_value=fake
+        ):
+            self.window.overdue_table.cellDoubleClicked.emit(0, 0)
+        self.assertEqual(self.emitted, [])
+
+
+class _FakeEditDialog:
+    """替身编辑对话框：绕过真实 QDialog，只回放预设结果。"""
+
+    def __init__(self, changes: dict):
+        self._changes = changes
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+
+        return QDialog.Accepted
+
+    def result_changes(self) -> dict:
+        return self._changes
+
+
 if __name__ == "__main__":
     unittest.main()

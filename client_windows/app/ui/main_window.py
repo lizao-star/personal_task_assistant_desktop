@@ -29,6 +29,7 @@ from ..ai.provider import LLMProvider
 from ..feishu.repository import SubTask, Task
 from .ai_task_dialog import AITaskDialog
 from .detail_dialog import TaskDetailDialog
+from .edit_task_dialog import EditTaskDialog
 from .task_dialog import NewTaskDialog
 from .tray import load_app_icon
 
@@ -139,6 +140,7 @@ class MainWindow(QWidget):
     defer_requested = Signal(str, datetime)               # record_id, 新截止时间
     detail_requested = Signal(str)                        # record_id（查看详情）
     breakdown_apply_requested = Signal(dict)              # M3：采纳 AI 拆解建议
+    edit_requested = Signal(dict)                         # 编辑任务（M2 写回扩展）
 
     def __init__(self):
         super().__init__()
@@ -233,7 +235,7 @@ class MainWindow(QWidget):
         self.today_table = TaskTable()
         layout.addWidget(self.today_table, stretch=2)
 
-        # 双击任务行打开详情
+        # 双击任务行打开编辑对话框
         self.today_table.cellDoubleClicked.connect(self._on_row_double_clicked)
         self.overdue_table.cellDoubleClicked.connect(self._on_row_double_clicked)
         # 记录最后交互的表格，避免跨表残留选中导致操作错行
@@ -421,18 +423,24 @@ class MainWindow(QWidget):
             self.detail_requested.emit(rid)
 
     def _on_row_double_clicked(self, row: int, _col: int) -> None:
-        """双击任务行：发出该行任务的查看详情信号。"""
+        """双击任务行：打开编辑对话框，确认后发出编辑信号。
+
+        编辑对象取自本轮渲染缓存（_rendered_tasks），未改动任何字段时不发信号。
+        """
         table = self.sender()
-        if table is self.today_table:
-            rid = self.today_table.selected_record_id_from_row(row)
-        elif table is self.overdue_table:
-            rid = self.overdue_table.selected_record_id_from_row(row)
-        elif table is self.inbox_table:
-            rid = self.inbox_table.selected_record_id_from_row(row)
-        else:
+        if not isinstance(table, TaskTable):
             return
-        if rid:
-            self.detail_requested.emit(rid)
+        rid = table.selected_record_id_from_row(row)
+        if not rid:
+            return
+        task = self._rendered_tasks.get(rid)
+        if task is None:
+            return
+        dlg = EditTaskDialog(task, self)
+        if dlg.exec() == QDialog.Accepted:
+            changes = dlg.result_changes()
+            if changes:
+                self.edit_requested.emit({"record_id": rid, "changes": changes})
 
     def _on_complete(self) -> None:
         rid = self._current_selected_record_id()

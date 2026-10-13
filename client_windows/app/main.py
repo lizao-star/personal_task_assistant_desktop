@@ -41,6 +41,7 @@ from .feishu.repository import (
     build_complete_fields,
     build_create_fields,
     build_defer_fields,
+    build_edit_fields,
     generate_external_id,
     get_overdue_tasks,
     get_today_tasks,
@@ -198,6 +199,7 @@ class AssistantApp(QObject):
         self.window.defer_requested.connect(self._on_defer)
         self.window.detail_requested.connect(self._on_detail)
         self.window.breakdown_apply_requested.connect(self._on_breakdown_apply)
+        self.window.edit_requested.connect(self._on_edit)
 
         # 托盘
         self.tray.show_action.triggered.connect(self._show_window)
@@ -462,6 +464,38 @@ class AssistantApp(QObject):
             return
         subtasks = group_subtasks(self._cache.load_subtasks(), record_id)
         self.window.show_task_detail(task, subtasks)
+
+    def _on_edit(self, payload: dict) -> None:
+        """编辑任务字段（M2 写回扩展）——入队 + 乐观更新本地缓存。
+
+        与完成/延期一致：先入队（带冲突检测基准 base_ms），再由后台线程推送；
+        变更字段的键名与 Task 属性同名，直接 setattr 回写本地缓存实现乐观更新。
+        """
+        record_id = payload.get("record_id", "")
+        changes = payload.get("changes") or {}
+        task = self._find_cached(record_id)
+        if task is None or not changes:
+            return
+        fields = build_edit_fields(changes)
+        if not fields:
+            return
+        self._cache.enqueue_op(
+            "edit",
+            {
+                "record_id": record_id,
+                "fields": fields,
+                "base_ms": task.modified_ms,
+                "title": task.title,
+            },
+        )
+        # 乐观更新：把变更直接写回本地 Task，界面立即生效
+        for key, value in changes.items():
+            if hasattr(task, key):
+                setattr(task, key, value)
+        self._cache.upsert_tasks([task])
+        self._render(self._cache.load_tasks())
+        self._refresh_pending_label()
+        self.start_incremental_sync()
 
     def _find_cached(self, record_id: str) -> Task | None:
         """从本地缓存中按 record_id 找任务。"""

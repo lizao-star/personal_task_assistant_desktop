@@ -43,7 +43,12 @@ class SyncService:
     CURSOR_KEY = "pull_cursor_ms"
 
     # 冲突提示用：操作类型 -> 用户可读的动作名
-    OP_LABELS = {"complete": "完成", "defer": "延期", "ai_breakdown": "AI 拆解"}
+    OP_LABELS = {
+        "complete": "完成",
+        "defer": "延期",
+        "ai_breakdown": "AI 拆解",
+        "edit": "编辑",
+    }
 
     def __init__(
         self,
@@ -151,7 +156,7 @@ class SyncService:
                 self._create_subtasks_safe(created.record_id, subtask_titles)
             return True, None
 
-        if op_type in ("complete", "defer", "ai_breakdown"):
+        if op_type in ("complete", "defer", "ai_breakdown", "edit"):
             record_id = payload.get("record_id", "")
             fields = payload.get("fields", {})
             base_ms = int(payload.get("base_ms", 0))

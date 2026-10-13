@@ -69,6 +69,17 @@ STATUS_DEFERRED = "延期"
 # 视为“已结束、不再提醒”的状态集合
 FINISHED_STATUSES = {STATUS_DONE, STATUS_CANCELLED}
 
+# ===== 状态选项（编辑表单下拉用，顺序即下拉展示顺序） =====
+STATUS_OPTIONS = [
+    STATUS_INBOX,
+    STATUS_TODO,
+    STATUS_DOING,
+    STATUS_WAITING,
+    STATUS_DEFERRED,
+    STATUS_DONE,
+    STATUS_CANCELLED,
+]
+
 # ===== 优先级选项（建任务表单用） =====
 PRIORITY_OPTIONS = ["P0", "P1", "P2", "P3"]
 
@@ -92,6 +103,9 @@ ENERGY_HIGH = "高"
 ENERGY_MEDIUM = "中"
 ENERGY_LOW = "低"
 
+# 精力需求下拉选项（含“未设置”空值，便于清空）
+ENERGY_OPTIONS = ["", ENERGY_HIGH, ENERGY_MEDIUM, ENERGY_LOW]
+
 # ===== 提醒规则文案 -> 提前时长（分钟） =====
 REMINDER_OFFSET_MINUTES = {
     "提前1天": 24 * 60,
@@ -99,6 +113,9 @@ REMINDER_OFFSET_MINUTES = {
     "提前30分钟": 30,
     "提前10分钟": 10,
 }
+
+# 提醒规则多选选项（键即飞书多选字段的选项文本）
+REMINDER_RULE_OPTIONS = list(REMINDER_OFFSET_MINUTES.keys())
 
 
 class MonitorLogFields:

@@ -19,6 +19,7 @@ from app.feishu.repository import (
     build_complete_fields,
     build_create_fields,
     build_defer_fields,
+    build_edit_fields,
     build_monitor_log_fields,
     generate_external_id,
 )
@@ -153,6 +154,78 @@ class TestBuildMonitorLogFields(unittest.TestCase):
         self.assertEqual(fields[MonitorLogFields.NOTIFY_COUNT], 3)
         self.assertTrue(fields[MonitorLogFields.CLOSED])
         self.assertEqual(fields[MonitorLogFields.NOTE], "L4 触发")
+
+
+class TestBuildEditFields(unittest.TestCase):
+    """编辑任务字段构建：仅写入调用方显式传入的字段。"""
+
+    def test_only_provided_fields(self):
+        fields = build_edit_fields({"title": "改后的标题"})
+        self.assertEqual(fields[TaskFields.TITLE], "改后的标题")
+        # 未传入的字段不应被写入，避免误清空远端数据
+        self.assertNotIn(TaskFields.DUE_AT, fields)
+        self.assertNotIn(TaskFields.PRIORITY, fields)
+        self.assertNotIn(TaskFields.DESCRIPTION, fields)
+
+    def test_multiple_fields(self):
+        due = datetime(2026, 11, 1, 9, 0, 0)
+        fields = build_edit_fields({
+            "title": "新标题",
+            "due_at": due,
+            "priority": "P2",
+            "description": "补充说明",
+            "estimate_min": 45,
+            "reminder_rules": ["提前10分钟"],
+        })
+        self.assertEqual(fields[TaskFields.TITLE], "新标题")
+        self.assertEqual(fields[TaskFields.DUE_AT], int(due.timestamp() * 1000))
+        self.assertEqual(fields[TaskFields.PRIORITY], "P2")
+        self.assertEqual(fields[TaskFields.DESCRIPTION], "补充说明")
+        self.assertEqual(fields[TaskFields.ESTIMATE_MIN], 45)
+        self.assertEqual(fields[TaskFields.REMINDER_RULE], ["提前10分钟"])
+
+    def test_clear_due_at(self):
+        """日期传 None 表示清空，应为 null 而非省略。"""
+        fields = build_edit_fields({"due_at": None})
+        self.assertIn(TaskFields.DUE_AT, fields)
+        self.assertIsNone(fields[TaskFields.DUE_AT])
+
+    def test_clear_multi_select(self):
+        """多选传空列表表示清空全部选项。"""
+        fields = build_edit_fields({"tags": [], "reminder_rules": []})
+        self.assertEqual(fields[TaskFields.TAGS], [])
+        self.assertEqual(fields[TaskFields.REMINDER_RULE], [])
+
+    def test_status_done_fills_completed_at(self):
+        """状态改为已完成时自动补完成时间，避免脏数据。"""
+        fields = build_edit_fields({"status": STATUS_DONE})
+        self.assertEqual(fields[TaskFields.STATUS], STATUS_DONE)
+        self.assertIn(TaskFields.COMPLETED_AT, fields)
+        self.assertIsInstance(fields[TaskFields.COMPLETED_AT], int)
+
+    def test_status_done_respects_explicit_completed_at(self):
+        """显式给出完成时间时以传入值为准。"""
+        done_at = datetime(2026, 10, 9, 20, 0, 0)
+        fields = build_edit_fields({"status": STATUS_DONE, "completed_at": done_at})
+        self.assertEqual(fields[TaskFields.COMPLETED_AT], int(done_at.timestamp() * 1000))
+
+    def test_status_not_done_no_completed_at(self):
+        """改为非完成状态时不写完成时间。"""
+        fields = build_edit_fields({"status": STATUS_TODO})
+        self.assertEqual(fields[TaskFields.STATUS], STATUS_TODO)
+        self.assertNotIn(TaskFields.COMPLETED_AT, fields)
+
+    def test_ai_breakdown_and_checklist(self):
+        """AI拆解 / 检查清单 支持写入与清空。"""
+        fields = build_edit_fields({
+            "ai_breakdown": "1. 读文献\n2. 写提纲",
+            "checklist": "开题报告已交",
+        })
+        self.assertEqual(fields[TaskFields.AI_BREAKDOWN], "1. 读文献\n2. 写提纲")
+        self.assertEqual(fields[TaskFields.CHECKLIST], "开题报告已交")
+        empty = build_edit_fields({"ai_breakdown": "", "checklist": ""})
+        self.assertEqual(empty[TaskFields.AI_BREAKDOWN], "")
+        self.assertEqual(empty[TaskFields.CHECKLIST], "")
 
 
 if __name__ == "__main__":

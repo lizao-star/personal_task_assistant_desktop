@@ -289,7 +289,7 @@ priority_score = 0.40 * urgency
 
 ### 设计
 
-客户端不直接调飞书写接口，而是把写操作（create/complete/defer）**先写入本地 SQLite 表 `pending_ops`**，再由后台线程按序推送。带来的好处：
+客户端不直接调飞书写接口，而是把写操作（create/complete/defer/ai_breakdown/edit）**先写入本地 SQLite 表 `pending_ops`**，再由后台线程按序推送。带来的好处：
 
 - **断网可用**：操作不丢，恢复后自动补交；
 - **顺序保证**：同一任务的多次操作按入队顺序执行；
@@ -300,7 +300,7 @@ priority_score = 0.40 * urgency
 ```sql
 CREATE TABLE pending_ops (
     op_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    op_type    TEXT NOT NULL,           -- create / complete / defer
+    op_type    TEXT NOT NULL,           -- create / complete / defer / ai_breakdown / edit
     payload    TEXT NOT NULL,           -- JSON：完整字段 + 冲突检测基准
     force      INTEGER NOT NULL DEFAULT 0,  -- 用户确认覆盖后为 1
     created_at TEXT NOT NULL
@@ -324,6 +324,11 @@ ai_breakdown（M3，采纳 AI 拆解）：
 {"record_id": "recXXX", "fields": {...AI拆解/检查清单/AI建议...}, "subtasks": ["步骤1"], "base_ms": 1759824000000, "title": "任务名"}
 ```
 
+edit（M2 写回扩展，编辑任务字段）：
+```json
+{"record_id": "recXXX", "fields": {...build_edit_fields 的产物（仅含改动列）...}, "base_ms": 1759824000000, "title": "任务名"}
+```
+
 `base_ms` 是入队时该任务在本地缓存的 `modified_ms`（云端最后修改时间），用于冲突检测。
 
 ### 幂等策略
@@ -334,10 +339,11 @@ ai_breakdown（M3，采纳 AI 拆解）：
 | complete     | `PUT` 本身幂等；状态/完成时间覆盖写，无副作用                                                                                              |
 | defer        | 同上                                                                                                                                       |
 | ai_breakdown | 同上（`base_ms` 冲突检测 + 覆盖写 AI拆解/检查清单/AI建议 三字段后写入子任务）                                                              |
+| edit         | 同上（`base_ms` 冲突检测 + 覆盖写本次改动列，未出现在 `fields` 的列不动）                                                                  |
 
 ### 冲突检测
 
-推送 complete/defer 前，若 `force=0` 且 `base_ms > 0`：
+推送 complete/defer/ai_breakdown/edit 前，若 `force=0` 且 `base_ms > 0`：
 
 1. 调 `GET .../records/{record_id}` 拿云端 `修改时间`；
 2. 若云端 > `base_ms`：保留该 op，记入冲突列表；
@@ -574,3 +580,57 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
    残留行号可能指向另一条任务。
 
 回归测试：`tests/test_main_window_selection.py`（8 个用例）。
+
+## 14. 编辑任务（M2 写回扩展，新增）
+
+一期方案：**双击任务行直接编辑字段**（任务详情仍由顶部「详情」按钮进入）。所有在客户端可见的任务（待办/逾期/收集箱）均可编辑，无需跳转飞书。
+
+### 14.1 交互链路
+
+```
+双击任务行 → EditTaskDialog（预填当前值）
+  → 用户改字段 →「确定」→ result_changes() 只产出「真正改动」的键
+  → MainWindow.edit_requested({"record_id", "changes"})
+  → main._on_edit：build_edit_fields(changes) → enqueue_op("edit") → 乐观更新本地缓存 + 立即重渲染
+  → start_incremental_sync → SyncService.push_pending → _push_one("edit") → update_task()
+```
+
+复用 M2 写回链路（离线队列 + `base_ms` 冲突检测 + 失败重试），编辑无需单独实现这些能力。
+
+### 14.2 可编辑字段（14 项）
+
+| 界面控件 | changes 键       | 飞书字段     | 写入格式                     |
+| -------- | ---------------- | ------------ | ---------------------------- |
+| 任务名   | `title`          | 任务名       | 文本（空串校验不通过）       |
+| 状态     | `status`         | 状态         | 单选文本（`STATUS_OPTIONS`） |
+| 优先级   | `priority`       | 优先级       | 单选文本                     |
+| 任务类型 | `task_type`      | 任务类型     | 单选文本                     |
+| 截止时间 | `due_at`         | 截止时间     | 毫秒时间戳 / 空              |
+| 开始时间 | `start_at`       | 开始时间     | 毫秒时间戳 / 空              |
+| 预计耗时 | `estimate_min`   | 预计耗时(分) | 整数（空按 0）               |
+| 精力需求 | `energy`         | 精力需求     | 单选文本（含「未设置」空）   |
+| 语音提醒 | `voice`          | 语音提醒     | 布尔                         |
+| 标签     | `tags`           | 标签         | 多选 `list[str]`             |
+| 描述     | `description`    | 描述         | 文本                         |
+| 提醒规则 | `reminder_rules` | 提醒规则     | 多选 `list[str]`             |
+| AI 拆解  | `ai_breakdown`   | AI拆解       | 文本（多行，可留空）         |
+| 检查清单 | `checklist`      | 检查清单     | 文本（多行，可留空）         |
+
+> AI 拆解 / 检查清单为详情页展示字段，一并纳入编辑（可手工修改或清空）。
+> 一期不含「实际耗时 / 重复规则 / 链接」等需扩展 `Task` 数据类的字段。
+
+### 14.3 清空与联动语义
+
+- **日期清空**：日期控件旁带「清空」勾选框，勾选后控件禁用，`changes` 中该键置 `None`，`build_edit_fields` 写飞书为 `null`。
+- **多选清空**：全部取消勾选 → `changes` 中该键为 `[]`，飞书写空数组。
+- **单选/文本清空**：精力需求选「未设置」→ 空串。
+- **状态联动完成时间**：`status == 已完成` 时，`build_edit_fields` 自动补 `完成时间`；若 `changes` 显式带 `completed_at` 则优先使用，否则取 `now()`。非完成状态不写完成时间。
+- **最小写入**：`build_edit_fields` 只输出 `changes` 中出现的键，未改动列一律不动，避免误清空。
+
+### 14.4 关键实现位置
+
+- 对话框：[ui/edit_task_dialog.py](../client_windows/app/ui/edit_task_dialog.py)（`EditTaskDialog`，`result_changes()`）
+- 字段构造：[feishu/repository.py](../client_windows/app/feishu/repository.py) 的 `build_edit_fields(changes)`
+- 信号接线：[ui/main_window.py](../client_windows/app/ui/main_window.py)（`edit_requested` + `_on_row_double_clicked`）、[app/main.py](../client_windows/app/main.py)（`_on_edit`）
+- 队列放行：[services/sync.py](../client_windows/app/services/sync.py)（`_push_one` 的 `edit` 分支 + `OP_LABELS`）
+- 单测：`tests/test_write_fields.py`（`TestBuildEditFields`）、`tests/test_main_window_selection.py`（`DoubleClickEditTest`）

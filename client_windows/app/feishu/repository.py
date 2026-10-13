@@ -393,6 +393,65 @@ def build_ai_breakdown_fields(
     return fields
 
 
+def build_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
+    """把编辑对话框的字段变更组装为飞书 fields 字典（M2 写回扩展：编辑任务）。
+
+    只写入 changes 中出现的键，未改动的字段不写，避免误清空其他列。
+    类型/清空语义：
+    - 日期：datetime -> 毫秒时间戳；None -> 传 null（飞书按“清空该字段”处理）；
+    - 多选：list[str]，传空列表即清空全部选项；
+    - 单选/文本：传空串即清空；
+    - 复选框：bool。
+    状态改为「已完成」且调用方未显式给出完成时间时，自动补当前时间，
+    避免出现“已完成但无完成时间”的脏数据。
+
+    支持的键（与 Task 属性同名）：
+        title / status / priority / task_type / due_at / start_at /
+        estimate_min / energy / voice / tags / description / reminder_rules /
+        ai_breakdown / checklist
+    """
+    fields: dict[str, Any] = {}
+
+    if "title" in changes:
+        fields[TaskFields.TITLE] = (changes.get("title") or "").strip()
+    if "priority" in changes:
+        fields[TaskFields.PRIORITY] = changes.get("priority") or ""
+    if "task_type" in changes:
+        fields[TaskFields.TYPE] = changes.get("task_type") or ""
+    if "due_at" in changes:
+        due = changes.get("due_at")
+        fields[TaskFields.DUE_AT] = _ms(due) if isinstance(due, datetime) else None
+    if "start_at" in changes:
+        start = changes.get("start_at")
+        fields[TaskFields.START_AT] = _ms(start) if isinstance(start, datetime) else None
+    if "estimate_min" in changes:
+        fields[TaskFields.ESTIMATE_MIN] = int(changes.get("estimate_min") or 0)
+    if "energy" in changes:
+        fields[TaskFields.ENERGY] = changes.get("energy") or ""
+    if "voice" in changes:
+        fields[TaskFields.VOICE] = bool(changes.get("voice"))
+    if "tags" in changes:
+        fields[TaskFields.TAGS] = list(changes.get("tags") or [])
+    if "description" in changes:
+        fields[TaskFields.DESCRIPTION] = changes.get("description") or ""
+    if "reminder_rules" in changes:
+        fields[TaskFields.REMINDER_RULE] = list(changes.get("reminder_rules") or [])
+    if "ai_breakdown" in changes:
+        fields[TaskFields.AI_BREAKDOWN] = changes.get("ai_breakdown") or ""
+    if "checklist" in changes:
+        fields[TaskFields.CHECKLIST] = changes.get("checklist") or ""
+    if "status" in changes:
+        status = changes.get("status") or ""
+        fields[TaskFields.STATUS] = status
+        if status == STATUS_DONE:
+            completed = changes.get("completed_at")
+            fields[TaskFields.COMPLETED_AT] = (
+                _ms(completed) if isinstance(completed, datetime) else _ms(datetime.now())
+            )
+
+    return fields
+
+
 def build_subtask_fields(
     parent_record_id: str, titles: list[str]
 ) -> list[dict[str, Any]]:
