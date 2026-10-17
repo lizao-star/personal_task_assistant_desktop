@@ -27,10 +27,9 @@ from PySide6.QtWidgets import (
 
 from ..ai.provider import LLMProvider
 from ..feishu.repository import SubTask, Task
-from .ai_task_dialog import AITaskDialog
+from .task_dialog import NewTaskDialog
 from .detail_dialog import TaskDetailDialog
 from .edit_task_dialog import EditTaskDialog
-from .task_dialog import NewTaskDialog
 from .tray import load_app_icon
 
 # 表格列定义：列名 -> 取值函数
@@ -169,13 +168,6 @@ class MainWindow(QWidget):
         self.new_button = QPushButton("新建任务")
         self.new_button.clicked.connect(self._on_new_task)
         top.addWidget(self.new_button)
-
-        # M3：AI 一句话建任务（未配置 Key 时置灰）
-        self.ai_button = QPushButton("AI 建任务")
-        self.ai_button.clicked.connect(self._on_ai_create)
-        self.ai_button.setEnabled(False)
-        self.ai_button.setToolTip("未配置 DEEPSEEK_API_KEY（config/.env）")
-        top.addWidget(self.ai_button)
 
         self.complete_button = QPushButton("完成")
         self.complete_button.clicked.connect(self._on_complete)
@@ -342,14 +334,9 @@ class MainWindow(QWidget):
         return self._paused
 
     def set_ai_provider(self, provider: LLMProvider | None, threshold: float = 0.6) -> None:
-        """注入 AI 供应商（M3）：已配置 Key 时启用 AI 建任务按钮。"""
+        """注入 AI 供应商（M3）：传给新建任务对话框的 AI 解析功能。"""
         self._ai_provider = provider
         self._ai_threshold = threshold
-        self.ai_button.setEnabled(provider is not None)
-        if provider is None:
-            self.ai_button.setToolTip("未配置 DEEPSEEK_API_KEY（config/.env）")
-        else:
-            self.ai_button.setToolTip("一句话交给 AI 拆解建任务")
 
     def show_task_detail(self, task: Task, subtasks: list[SubTask]) -> None:
         """打开任务详情对话框（由 main.py 提供子任务数据）。"""
@@ -373,16 +360,10 @@ class MainWindow(QWidget):
         self.pause_toggled.emit(self._paused)
 
     def _on_new_task(self) -> None:
-        """弹出新建任务对话框，确认后发信号给 main.py。"""
-        dlg = NewTaskDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            self.create_requested.emit(dlg.result_dict())
-
-    def _on_ai_create(self) -> None:
-        """M3：AI 一句话建任务，确认后走与手动新建相同的写回链路。"""
-        if self._ai_provider is None:
-            return
-        dlg = AITaskDialog(self._ai_provider, self._ai_threshold, parent=self)
+        """弹出新建任务对话框（含可选 AI 解析），确认后发信号给 main.py。"""
+        dlg = NewTaskDialog(
+            self, provider=self._ai_provider, threshold=self._ai_threshold
+        )
         if dlg.exec() == QDialog.Accepted:
             self.create_requested.emit(dlg.result_dict())
 

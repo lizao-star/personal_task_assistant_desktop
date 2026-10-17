@@ -332,7 +332,7 @@ def build_create_fields(
 ) -> dict[str, Any]:
     """把新建任务的本地输入组装为飞书 fields 字典。
 
-    M3 起 AI 建任务会附带 energy/tags/ai_breakdown/checklist，
+    M3 起新建任务的 AI 解析会附带 energy/tags/ai_breakdown/checklist，
     以及低置信度时的 status=收集箱。
     """
     fields: dict[str, Any] = {

@@ -376,7 +376,7 @@ edit（M2 写回扩展，编辑任务字段）：
 ### 调用链
 
 ```
-UI（AI 建任务 / 详情页 AI 拆解按钮）
+UI（新建任务对话框的 AI 解析填充 / 详情页 AI 拆解按钮）
     │  QThread（AIInvoker，界面线程不做 IO）
     ▼
 parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
@@ -388,7 +388,7 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 - Key 从 `config/.env` 的 `DEEPSEEK_API_KEY` 读取，不入库、不打日志；
 - 超时默认 60 秒（`settings.yaml ai.timeout_seconds`），可被 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 覆盖；
-- **成本控制**：只在「AI 建任务 / 手动点 AI 拆解」时调用，无任何定时轮询；
+- **成本控制**：只在「新建任务 AI 解析 / 手动点 AI 拆解」时调用，无任何定时轮询；
 - 每次调用记录 token 用量（日志 + 供应商累计计数 + 界面展示）。
 
 ### 输出契约（JSON Schema，对齐设计总纲 5.4）
@@ -429,7 +429,7 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 ### 写回路径
 
-- **AI 建任务**：与手动新建同链路（离线队列 `create` op）；payload 额外携带 `subtasks`，推送阶段主任务落表后由 `_create_subtasks_safe` 写入子任务表并按「所属任务」关联（子任务表未配置/写入失败仅记日志，不影响主任务）。
+- **新建任务 AI 解析**：与手动新建同链路（离线队列 `create` op，现已合并在同一对话框）；payload 额外携带 `subtasks`，推送阶段主任务落表后由 `_create_subtasks_safe` 写入子任务表并按「所属任务」关联（子任务表未配置/写入失败仅记日志，不影响主任务）。
 - **AI 拆解采纳**：新队列 op `ai_breakdown`（复用完成/延期的冲突检测基准 `base_ms`），推送时更新 `AI拆解/检查清单/AI建议` 三字段并写子任务。
 - AI 只产出建议文本，**绝不自动改任务状态**；采纳与否由用户点击决定。
 

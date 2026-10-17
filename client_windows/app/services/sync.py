@@ -151,7 +151,7 @@ class SyncService:
             created = create_task(
                 self._client, self._app_token, self._table_id, fields
             )
-            # M3：AI 建任务可携带子任务，主任务落表后立刻写入并关联
+            # M3：新建任务的 AI 解析可携带子任务，主任务落表后立刻写入并关联
             if created.record_id and subtask_titles:
                 self._create_subtasks_safe(created.record_id, subtask_titles)
             return True, None

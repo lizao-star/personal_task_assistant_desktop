@@ -362,7 +362,7 @@ class AssistantApp(QObject):
     def _on_create(self, payload: dict) -> None:
         """新建任务：入队并触发推送（不乐观更新，等拉取回来再显示）。
 
-        M3 起 AI 建任务的 payload 会额外带 subtasks / low_confidence，
+        M3 起新建任务 AI 解析的 payload 会额外带 subtasks / low_confidence，
         这两个键不进 build_create_fields，子任务在推送落表后一并写入。
         """
         subtasks = payload.pop("subtasks", [])
