@@ -661,3 +661,13 @@ Windows 任务栏按钮的图标默认取**宿主可执行文件**（python.exe 
 > **关闭再开启一次「开机自启」**，用新命令覆盖注册表旧值。
 
 单测：`tests/test_autostart.py`（`TestBuildCommand`）。
+
+### 15.3 托盘唤起主窗口
+
+托盘菜单「打开主界面」与双击托盘图标统一走
+[app/ui/main_window.py](../client_windows/app/ui/main_window.py) 的 `bring_to_front()`：
+
+1. 最小化时 `showNormal()` 还原（`show()` 不会还原最小化窗口）；
+2. `raise_()` + `activateWindow()` 提升 Qt 层级；
+3. Windows 前台锁定策略可能让 `activateWindow()` 只闪任务栏，追加
+   `SetForegroundWindow(hwnd)` 强制置前（非 Windows 平台安全跳过）。

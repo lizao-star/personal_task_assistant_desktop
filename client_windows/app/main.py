@@ -528,9 +528,7 @@ class AssistantApp(QObject):
     # ------------------------------------------------------------------
     def _show_window(self) -> None:
         """显示并激活主窗口。"""
-        self.window.show()
-        self.window.raise_()
-        self.window.activateWindow()
+        self.window.bring_to_front()
 
     def _on_pause_changed(self, paused: bool) -> None:
         """统一处理暂停提醒（窗口与托盘状态保持一致）。

@@ -473,6 +473,25 @@ class MainWindow(QWidget):
             return
         self.defer_requested.emit(rid, new_due)
 
+    def bring_to_front(self) -> None:
+        """还原并置顶主窗口（托盘「打开主界面」/双击托盘唤起用）。
+
+        仅 show() 无法还原最小化窗口；Windows 前台锁定策略还可能让
+        activateWindow() 只闪任务栏而不置前，因此补 SetForegroundWindow。
+        """
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        try:
+            import ctypes
+
+            ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
+        except (AttributeError, OSError):
+            pass
+
     def closeEvent(self, event) -> None:
         """点击关闭按钮时不退出程序，隐藏到托盘继续后台运行。"""
         event.ignore()

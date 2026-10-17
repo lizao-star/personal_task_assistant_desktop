@@ -91,6 +91,4 @@ class TrayController:
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """双击托盘图标时显示主窗口。"""
         if reason == QSystemTrayIcon.DoubleClick:
-            self._parent.show()
-            self._parent.raise_()
-            self._parent.activateWindow()
+            self._parent.bring_to_front()
