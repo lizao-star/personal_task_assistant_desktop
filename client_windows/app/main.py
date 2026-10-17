@@ -706,8 +706,28 @@ class AssistantApp(QObject):
         self._qt_app.quit()
 
 
+def _set_app_user_model_id() -> None:
+    """注册 AppUserModelID，让任务栏显示本应用图标而非宿主 python.exe 的图标。
+
+    Windows 任务栏按钮默认取宿主可执行文件（python.exe / pythonw.exe）的图标，
+    仅 setWindowIcon 不生效；必须在创建 QApplication 之前调用本函数，
+    任务栏才会改用 setWindowIcon 设置的应用图标。
+    非 Windows 平台或调用失败时安全跳过。
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "PersonalTaskAssistant"
+        )
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> int:
     """程序入口。"""
+    # 必须在 QApplication 创建之前注册，任务栏图标才会用应用自己的 logo
+    _set_app_user_model_id()
     app = QApplication(sys.argv)
     # 关闭最后一个窗口不退出（托盘常驻）
     app.setQuitOnLastWindowClosed(False)

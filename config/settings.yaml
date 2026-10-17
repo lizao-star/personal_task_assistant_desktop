@@ -50,7 +50,7 @@ monitor:
   sample_interval_seconds: 5
   # 容忍窗口（秒）：短暂切走（查资料/回消息）不结束会话，
   # 窗口内切回继续累计、不重复写日志；0 表示关闭容忍（切走即结束）
-  grace_seconds: 60
+  grace_seconds: 120
   # 进程/窗口标题白名单（命中则不视为娱乐，不计时）；白名单优先于黑名单
   whitelist_titles: ["Word", "Excel", "PowerPoint", "PyCharm", "Visual Studio", "Code"]
   # 域名白名单（扩展上报的域名命中则豁免）

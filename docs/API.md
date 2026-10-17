@@ -634,3 +634,30 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 - 信号接线：[ui/main_window.py](../client_windows/app/ui/main_window.py)（`edit_requested` + `_on_row_double_clicked`）、[app/main.py](../client_windows/app/main.py)（`_on_edit`）
 - 队列放行：[services/sync.py](../client_windows/app/services/sync.py)（`_push_one` 的 `edit` 分支 + `OP_LABELS`）
 - 单测：`tests/test_write_fields.py`（`TestBuildEditFields`）、`tests/test_main_window_selection.py`（`DoubleClickEditTest`）
+
+## 15. 任务栏图标与开机自启
+
+### 15.1 任务栏图标（AppUserModelID）
+
+Windows 任务栏按钮的图标默认取**宿主可执行文件**（python.exe / pythonw.exe）的图标，
+`QApplication.setWindowIcon` 只影响窗口标题栏与 Alt+Tab，对任务栏按钮不生效。
+
+修复方式：在创建 `QApplication` **之前**调用
+`SetCurrentProcessExplicitAppUserModelID("PersonalTaskAssistant")`
+（[app/main.py](../client_windows/app/main.py) 的 `_set_app_user_model_id()`）。
+注册后 Windows 将进程视为独立应用，任务栏改用 `setWindowIcon` 设置的
+`assets/app_icon.png`。无论经 Spyder、run.bat 还是开机自启启动，任务栏均显示应用 logo。
+
+### 15.2 开机自启命令
+
+[app/services/autostart.py](../client_windows/app/services/autostart.py) 写注册表
+`HKCU\...\CurrentVersion\Run`，命令构造规则：
+
+1. **优先**用项目 `client_windows/.venv/Scripts/pythonw.exe`（无控制台窗口，且与运行环境一致）；
+2. venv 不存在时回退 `sys.executable` 同目录的 pythonw.exe。
+
+> 历史问题：旧版用 `sys.executable` 定位解释器，在 Spyder 里开启自启会把 Spyder
+> 捆绑的 pythonw.exe 写进注册表，任务栏随之显示 Spyder 图标。修复后需在客户端
+> **关闭再开启一次「开机自启」**，用新命令覆盖注册表旧值。
+
+单测：`tests/test_autostart.py`（`TestBuildCommand`）。

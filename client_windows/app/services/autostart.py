@@ -19,10 +19,17 @@ VALUE_NAME = "PersonalTaskAssistant"
 def _build_command() -> str:
     """构造开机启动命令：pythonw.exe + 入口脚本路径。"""
     # 入口脚本：client_windows/run.py
-    entry = Path(__file__).resolve().parents[2] / "run.py"
-    # 优先用同目录下的 pythonw.exe（无黑窗口）
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    python = pythonw if pythonw.exists() else Path(sys.executable)
+    client_root = Path(__file__).resolve().parents[2]
+    entry = client_root / "run.py"
+    # 优先用项目虚拟环境的 pythonw.exe（无黑窗口）。
+    # 不要用 sys.executable 定位：在 Spyder 等宿主环境里开启自启时，
+    # 会把宿主的解释器写进注册表，导致任务栏显示宿主程序的图标。
+    venv_pythonw = client_root / ".venv" / "Scripts" / "pythonw.exe"
+    if venv_pythonw.exists():
+        python = venv_pythonw
+    else:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        python = pythonw if pythonw.exists() else Path(sys.executable)
     return f'"{python}" "{entry}"'
 
 
