@@ -20,19 +20,25 @@ logger = logging.getLogger(__name__)
 
 from ..feishu.client import FeishuClient
 from ..feishu.repository import (
+    Goal,
     Task,
+    attach_goal_tasks,
     build_subtask_fields,
+    create_goal,
     create_monitor_log,
     create_subtask,
     create_task,
     find_by_external_id,
+    find_goal_by_external_id,
     get_remote_modified_ms,
+    list_goals,
     list_subtasks,
     list_tasks,
+    to_goal,
     to_task,
     update_task,
 )
-from ..constants import TaskFields
+from ..constants import GoalFields, TaskFields
 from .cache import LocalCache, PendingOp
 
 
@@ -41,6 +47,7 @@ class SyncService:
 
     # 缓存中增量游标的键名
     CURSOR_KEY = "pull_cursor_ms"
+    GOAL_CURSOR_KEY = "goal_pull_cursor_ms"
 
     # 冲突提示用：操作类型 -> 用户可读的动作名
     OP_LABELS = {
@@ -48,6 +55,7 @@ class SyncService:
         "defer": "延期",
         "ai_breakdown": "AI 拆解",
         "edit": "编辑",
+        "goal_create": "新建目标",
     }
 
     def __init__(
@@ -58,6 +66,7 @@ class SyncService:
         cache: LocalCache,
         subtask_table_id: str = "",
         monitor_log_table_id: str = "",
+        goal_table_id: str = "",
     ):
         self._client = client
         self._app_token = app_token
@@ -67,6 +76,8 @@ class SyncService:
         self._subtask_table_id = subtask_table_id
         # 可选：娱乐监控日志表 table_id，为空时跳过日志推送（M4）
         self._monitor_log_table_id = monitor_log_table_id
+        # 可选：目标/项目表 table_id，为空时跳过目标拉取与写入（M4.5）
+        self._goal_table_id = goal_table_id
 
     # ------------------------------------------------------------------
     # 推送离线队列
@@ -156,6 +167,9 @@ class SyncService:
                 self._create_subtasks_safe(created.record_id, subtask_titles)
             return True, None
 
+        if op_type == "goal_create":
+            return self._push_goal_create(payload), None
+
         if op_type in ("complete", "defer", "ai_breakdown", "edit"):
             record_id = payload.get("record_id", "")
             fields = payload.get("fields", {})
@@ -184,6 +198,53 @@ class SyncService:
 
         # 未知类型：直接丢弃，避免阻塞队列
         return True, None
+
+    def _push_goal_create(self, payload: dict[str, Any]) -> bool:
+        """推送「新建目标」：先建目标 → 再建任务（关联所属目标）→ 再建子任务。
+
+        幂等策略（对齐路线图 M4.5 验收第 4 条）：
+        - 目标按外部ID查重，已存在则复用其 record_id，不重复建目标；
+        - 每条任务同样按外部ID查重，已存在则跳过（只补子任务）；
+        任一步失败直接抛出，op 保留在队列中，下次只补未完成的部分。
+        """
+        if not self._goal_table_id:
+            logger.warning("目标表未配置，跳过目标写入")
+            return True
+
+        goal_external_id = payload.get("external_id", "")
+        goal_fields = payload.get("fields", {})
+        goal: Goal | None = None
+        if goal_external_id:
+            goal = find_goal_by_external_id(
+                self._client, self._app_token, self._goal_table_id, goal_external_id
+            )
+        if goal is None:
+            goal = create_goal(
+                self._client, self._app_token, self._goal_table_id, goal_fields
+            )
+        if not goal.record_id:
+            return False
+
+        for item in payload.get("tasks") or []:
+            task_external_id = item.get("external_id", "")
+            fields = dict(item.get("fields") or {})
+            subtasks = item.get("subtasks") or []
+            fields[TaskFields.GOAL] = [goal.record_id]
+            existing = None
+            if task_external_id:
+                existing = find_by_external_id(
+                    self._client, self._app_token, self._table_id, task_external_id
+                )
+            if existing is not None:
+                if existing.record_id and subtasks:
+                    self._create_subtasks_safe(existing.record_id, subtasks)
+                continue
+            created = create_task(
+                self._client, self._app_token, self._table_id, fields
+            )
+            if created.record_id and subtasks:
+                self._create_subtasks_safe(created.record_id, subtasks)
+        return True
 
     def _create_subtasks_safe(self, parent_record_id: str, titles: list[str]) -> None:
         """写入子任务并关联主任务；子任务表未配置或写入失败都不抛出。"""
@@ -214,6 +275,53 @@ class SyncService:
         except Exception as e:
             logger.warning("子任务表拉取失败（不影响任务同步）: %s", e)
 
+    def _pull_goals(self, full: bool = True) -> None:
+        """拉取目标/项目表并写入本地缓存（M4.5）。
+
+        目标表规模小，full=True 时整体替换；增量时按修改时间游标只 upsert 变更项。
+        未配置目标表或拉取失败都不影响任务同步。
+        """
+        if not self._goal_table_id:
+            return
+        try:
+            if full:
+                goals = list_goals(self._client, self._app_token, self._goal_table_id)
+                self._cache.replace_goals(goals)
+                cursor = max((g.modified_ms for g in goals), default=0)
+                self._cache.set_meta(self.GOAL_CURSOR_KEY, str(cursor))
+                return
+            cursor_str = self._cache.get_meta(self.GOAL_CURSOR_KEY, "")
+            if not cursor_str:
+                self._pull_goals(full=True)
+                return
+            conditions = [
+                {
+                    "field_name": GoalFields.UPDATED_AT,
+                    "operator": "isGreater",
+                    "value": ["ExactDate", cursor_str],
+                }
+            ]
+            records = self._client.search_records(
+                self._app_token, self._goal_table_id, conditions
+            )
+            changed = [to_goal(r) for r in records]
+            if changed:
+                # 合并现有快照后整体替换（目标数量少，避免额外的 upsert 接口）
+                merged = {g.record_id: g for g in self._cache.load_goals()}
+                for goal in changed:
+                    merged[goal.record_id] = goal
+                self._cache.replace_goals(list(merged.values()))
+                new_cursor = max(
+                    int(cursor_str), max(g.modified_ms for g in changed)
+                )
+                self._cache.set_meta(self.GOAL_CURSOR_KEY, str(new_cursor))
+        except Exception as e:
+            logger.warning("目标表拉取失败（不影响任务同步）: %s", e)
+
+    def load_goals(self) -> list[Goal]:
+        """读取本地目标缓存，并把任务关联回填到 Goal.task_record_ids。"""
+        return attach_goal_tasks(self._cache.load_goals(), self._cache.load_tasks())
+
     def full_pull(self) -> list[Task]:
         """全量拉取并重建本地缓存。返回最新任务列表。"""
         tasks = list_tasks(self._client, self._app_token, self._table_id)
@@ -222,6 +330,7 @@ class SyncService:
         cursor = max((t.modified_ms for t in tasks), default=0)
         self._cache.set_meta(self.CURSOR_KEY, str(cursor))
         self._pull_subtasks()
+        self._pull_goals(full=True)
         return tasks
 
     def incremental_pull(self) -> list[Task]:
@@ -256,4 +365,6 @@ class SyncService:
             self._cache.set_meta(self.CURSOR_KEY, str(new_cursor))
             # 只有任务有变更时才顺带刷子任务表（减少无谓的飞书请求）
             self._pull_subtasks()
+        # 目标表可能被单独修改（如在飞书里改状态），每轮都做一次轻量增量
+        self._pull_goals(full=False)
         return self._cache.load_tasks()

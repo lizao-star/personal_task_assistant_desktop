@@ -19,6 +19,10 @@ from typing import Any
 
 from ..constants import (
     FINISHED_STATUSES,
+    GOAL_FINISHED_STATUSES,
+    GOAL_STATUS_DOING,
+    GOAL_STATUS_NOT_STARTED,
+    GoalFields,
     MonitorLogFields,
     STATUS_DONE,
     STATUS_INBOX,
@@ -146,6 +150,8 @@ class Task:
     # M3 新增：AI 拆解与检查清单（详情对话框展示）
     ai_breakdown: str = ""
     checklist: str = ""
+    # M4.5 新增：所属目标（目标项目表 record_id，最多 1 个）
+    goal_record_id: str = ""
 
     @property
     def is_finished(self) -> bool:
@@ -163,6 +169,7 @@ class Task:
 def to_task(record: dict[str, Any]) -> Task:
     """把一条飞书原始记录转换为 Task 对象。"""
     fields = record.get("fields", {})
+    goals = parse_links(fields.get(TaskFields.GOAL))
     return Task(
         record_id=record.get("record_id", ""),
         title=parse_text(fields.get(TaskFields.TITLE)) or "(未命名任务)",
@@ -184,6 +191,7 @@ def to_task(record: dict[str, Any]) -> Task:
         modified_at=parse_datetime(fields.get(TaskFields.UPDATED_AT)),
         ai_breakdown=parse_text(fields.get(TaskFields.AI_BREAKDOWN)),
         checklist=parse_text(fields.get(TaskFields.CHECKLIST)),
+        goal_record_id=goals[0] if goals else "",
     )
 
 
@@ -230,6 +238,91 @@ def to_subtask(record: dict[str, Any]) -> SubTask:
 def list_subtasks(client: FeishuClient, app_token: str, table_id: str) -> list[SubTask]:
     """拉取子任务表全部记录并解析为 SubTask 列表。"""
     return [to_subtask(record) for record in client.iter_records(app_token, table_id)]
+
+
+# ----------------------------------------------------------------------
+# 目标/项目领域对象（M4.5）
+# ----------------------------------------------------------------------
+@dataclass
+class Goal:
+    """归一化后的目标/项目（L1）。"""
+
+    record_id: str
+    title: str
+    level: str = ""
+    status: str = ""
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    description: str = ""
+    key_results: str = ""
+    progress: int = 0
+    external_id: str = ""
+    modified_at: datetime | None = None
+    # 该目标下的任务 record_id（由任务表「所属目标」反向聚合，不依赖关联列）
+    task_record_ids: list[str] = field(default_factory=list)
+
+    @property
+    def is_finished(self) -> bool:
+        """目标是否已结束（完成/取消）。"""
+        return self.status in GOAL_FINISHED_STATUSES
+
+    @property
+    def modified_ms(self) -> int:
+        """云端最后修改时间（毫秒），无则 0。"""
+        if self.modified_at is None:
+            return 0
+        return int(self.modified_at.timestamp() * 1000)
+
+
+def to_goal(record: dict[str, Any]) -> Goal:
+    """把一条飞书「目标/项目表」原始记录转换为 Goal 对象。"""
+    fields = record.get("fields", {})
+    return Goal(
+        record_id=record.get("record_id", ""),
+        title=parse_text(fields.get(GoalFields.TITLE)) or "(未命名目标)",
+        level=parse_select(fields.get(GoalFields.LEVEL)),
+        status=parse_select(fields.get(GoalFields.STATUS)),
+        start_at=parse_datetime(fields.get(GoalFields.START_AT)),
+        end_at=parse_datetime(fields.get(GoalFields.END_AT)),
+        description=parse_text(fields.get(GoalFields.DESCRIPTION)),
+        key_results=parse_text(fields.get(GoalFields.KEY_RESULTS)),
+        progress=parse_number(fields.get(GoalFields.PROGRESS)),
+        external_id=parse_text(fields.get(GoalFields.EXTERNAL_ID)),
+        modified_at=parse_datetime(fields.get(GoalFields.UPDATED_AT)),
+    )
+
+
+def list_goals(client: FeishuClient, app_token: str, table_id: str) -> list[Goal]:
+    """拉取目标/项目表全部记录并解析为 Goal 列表。"""
+    return [to_goal(record) for record in client.iter_records(app_token, table_id)]
+
+
+def attach_goal_tasks(goals: list[Goal], tasks: list[Task]) -> list[Goal]:
+    """按任务的「所属目标」把任务 record_id 聚合到对应 Goal 上。
+
+    目标表里的「关联任务」是反向关联列，写入时机与任务表不同步，
+    因此界面展示以任务表的正向关联为准，保证刚建的目标也能立刻看到任务。
+    """
+    by_goal: dict[str, list[str]] = {}
+    for task in tasks:
+        if task.goal_record_id:
+            by_goal.setdefault(task.goal_record_id, []).append(task.record_id)
+    for goal in goals:
+        goal.task_record_ids = by_goal.get(goal.record_id, [])
+    return goals
+
+
+def get_active_goals(goals: list[Goal]) -> list[Goal]:
+    """活跃目标：未完成、未取消（主窗口目标计划区展示用）。"""
+    return [g for g in goals if not g.is_finished]
+
+
+def _progress_percent(goals_tasks: list[Task]) -> int:
+    """按已完成任务数计算进度百分比（0~100）。"""
+    if not goals_tasks:
+        return 0
+    done = sum(1 for t in goals_tasks if t.is_finished)
+    return int(round(done * 100 / len(goals_tasks)))
 
 
 def group_subtasks(
@@ -329,11 +422,13 @@ def build_create_fields(
     tags: list[str] | None = None,
     ai_breakdown: str = "",
     checklist: str = "",
+    goal_record_id: str = "",
 ) -> dict[str, Any]:
     """把新建任务的本地输入组装为飞书 fields 字典。
 
     M3 起新建任务的 AI 解析会附带 energy/tags/ai_breakdown/checklist，
     以及低置信度时的 status=收集箱。
+    M4.5 起支持 goal_record_id：写入任务的「所属目标」关联字段。
     """
     fields: dict[str, Any] = {
         TaskFields.TITLE: title,
@@ -359,6 +454,8 @@ def build_create_fields(
         fields[TaskFields.AI_BREAKDOWN] = ai_breakdown
     if checklist:
         fields[TaskFields.CHECKLIST] = checklist
+    if goal_record_id:
+        fields[TaskFields.GOAL] = [goal_record_id]
     return fields
 
 
@@ -440,6 +537,9 @@ def build_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
         fields[TaskFields.AI_BREAKDOWN] = changes.get("ai_breakdown") or ""
     if "checklist" in changes:
         fields[TaskFields.CHECKLIST] = changes.get("checklist") or ""
+    if "goal_record_id" in changes:
+        goal_id = (changes.get("goal_record_id") or "").strip()
+        fields[TaskFields.GOAL] = [goal_id] if goal_id else []
     if "status" in changes:
         status = changes.get("status") or ""
         fields[TaskFields.STATUS] = status
@@ -518,6 +618,70 @@ def get_remote_modified_ms(
     record = client.get_record(app_token, table_id, record_id)
     updated = parse_datetime(record.get("fields", {}).get(TaskFields.UPDATED_AT))
     return int(updated.timestamp() * 1000) if updated else 0
+
+
+# ----------------------------------------------------------------------
+# 写接口（M4.5：目标/项目表）
+# ----------------------------------------------------------------------
+def build_goal_fields(
+    *,
+    title: str,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    level: str = "月",
+    status: str = GOAL_STATUS_NOT_STARTED,
+    description: str = "",
+    key_results: list[str] | str | None = None,
+    external_id: str = "",
+) -> dict[str, Any]:
+    """把目标级输入组装为飞书「目标/项目表」fields 字典。
+
+    - 日期：datetime -> 毫秒时间戳，None 时不写（避免误清空）；
+    - 关键结果：list[str] 按行拼接为文本，便于在飞书里直接阅读；
+    - 外部ID / 同步来源：与任务表一致，用于幂等重试。
+    """
+    fields: dict[str, Any] = {
+        GoalFields.TITLE: title,
+        GoalFields.LEVEL: level,
+        GoalFields.STATUS: status,
+        GoalFields.SYNC_SOURCE: SYNC_SOURCE_CLIENT,
+    }
+    if start_at is not None:
+        fields[GoalFields.START_AT] = _ms(start_at)
+    if end_at is not None:
+        fields[GoalFields.END_AT] = _ms(end_at)
+    if description:
+        fields[GoalFields.DESCRIPTION] = description
+    if key_results:
+        if isinstance(key_results, str):
+            text = key_results.strip()
+        else:
+            text = "\n".join(f"- {kr.strip()}" for kr in key_results if kr.strip())
+        if text:
+            fields[GoalFields.KEY_RESULTS] = text
+    if external_id:
+        fields[GoalFields.EXTERNAL_ID] = external_id
+    return fields
+
+
+def find_goal_by_external_id(
+    client: FeishuClient, app_token: str, table_id: str, external_id: str
+) -> Goal | None:
+    """按外部ID查重目标，命中则返回已存在的目标（幂等键）。"""
+    conditions = [
+        {"field_name": GoalFields.EXTERNAL_ID, "operator": "is", "value": [external_id]}
+    ]
+    for record in client.search_records(app_token, table_id, conditions):
+        return to_goal(record)
+    return None
+
+
+def create_goal(
+    client: FeishuClient, app_token: str, table_id: str, fields: dict[str, Any]
+) -> Goal:
+    """新建目标/项目记录，返回创建后的 Goal（含 record_id）。"""
+    record = client.create_record(app_token, table_id, fields)
+    return to_goal(record)
 
 
 # ----------------------------------------------------------------------

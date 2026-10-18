@@ -33,15 +33,17 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .ai.provider import DeepSeekProvider
 from .config import DATA_DIR, load_config
-from .constants import STATUS_DONE, STATUS_TODO
+from .constants import LEVEL_GOAL, STATUS_DONE, STATUS_TODO
 from .feishu.client import FeishuClient
 from .feishu.repository import (
     Task,
+    attach_goal_tasks,
     build_ai_breakdown_fields,
     build_complete_fields,
     build_create_fields,
     build_defer_fields,
     build_edit_fields,
+    build_goal_fields,
     generate_external_id,
     get_overdue_tasks,
     get_today_tasks,
@@ -95,6 +97,7 @@ class SyncWorker(QObject):
                 self._cache,
                 subtask_table_id=c.subtask_table_id,
                 monitor_log_table_id=c.monitor_log_table_id,
+                goal_table_id=c.goal_table_id,
             )
             if self._full:
                 tasks = svc.full_pull()
@@ -360,13 +363,50 @@ class AssistantApp(QObject):
     # 写操作：先入队 + 乐观更新 + 后台推送
     # ------------------------------------------------------------------
     def _on_create(self, payload: dict) -> None:
-        """新建任务：入队并触发推送（不乐观更新，等拉取回来再显示）。
+        """新建：按层级分别入队（M4.5）。
 
-        M3 起新建任务 AI 解析的 payload 会额外带 subtasks / low_confidence，
-        这两个键不进 build_create_fields，子任务在推送落表后一并写入。
+        - level=goal：入队 goal_create，推送时先建目标，再建 L2 任务并关联
+          「所属目标」，最后建子任务；
+        - level=task（默认）：入队 create，子任务在主任务落表后写入。
+        low_confidence 只用于 UI 提示，不写表。
         """
-        subtasks = payload.pop("subtasks", [])
         payload.pop("low_confidence", None)
+        level = payload.pop("level", "")
+
+        if level == LEVEL_GOAL:
+            goal_external_id = generate_external_id()
+            goal_fields = build_goal_fields(
+                external_id=goal_external_id, **payload.pop("goal")
+            )
+            tasks: list[dict] = []
+            for item in payload.pop("tasks", []):
+                item = dict(item)
+                subtasks = item.pop("subtasks", []) or []
+                # 目标级拆解草稿只填核心字段，其余按任务默认值补齐
+                item.setdefault("task_type", "其他")
+                task_external_id = generate_external_id()
+                tasks.append(
+                    {
+                        "external_id": task_external_id,
+                        "fields": build_create_fields(
+                            external_id=task_external_id, **item
+                        ),
+                        "subtasks": subtasks,
+                    }
+                )
+            self._cache.enqueue_op(
+                "goal_create",
+                {
+                    "external_id": goal_external_id,
+                    "fields": goal_fields,
+                    "tasks": tasks,
+                },
+            )
+            self._refresh_pending_label()
+            self.start_incremental_sync()
+            return
+
+        subtasks = payload.pop("subtasks", [])
         external_id = generate_external_id()
         fields = build_create_fields(external_id=external_id, **payload)
         self._cache.enqueue_op(
@@ -512,11 +552,15 @@ class AssistantApp(QObject):
     # 渲染与提醒
     # ------------------------------------------------------------------
     def _render(self, tasks: list[Task]) -> None:
-        """计算优先级并渲染待办/逾期/收集箱表格。"""
+        """计算优先级并渲染目标计划 + 待办/逾期/收集箱表格。"""
         today_scored = rank_tasks(get_today_tasks(tasks))
         overdue_scored = rank_tasks(get_overdue_tasks(tasks))
         inbox_scored = rank_tasks(get_inbox_tasks(tasks))
-        self.window.render(today_scored, overdue_scored, inbox_scored, datetime.now())
+        # 目标计划：缓存中的目标 + 关联任务数（按任务表的所属目标回填）
+        goals = attach_goal_tasks(self._cache.load_goals(), tasks)
+        self.window.render(
+            today_scored, overdue_scored, inbox_scored, datetime.now(), goals
+        )
 
     def _check_reminders(self) -> None:
         """定时提醒检查：基于最近一次缓存的数据。"""

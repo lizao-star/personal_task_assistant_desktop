@@ -1,6 +1,10 @@
-"""AI 提示词模板（M3）。
+"""AI 提示词模板（M3 / M4.5）。
 
 要求：统一 JSON 输出契约（对齐 docs/设计总纲.md 5.4），字段缺失时留空不瞎猜。
+
+M4.5 起增加「层级判定」：
+- level=goal（目标/项目，1 个月以上）必须向下拆解 2~5 个任务；
+- level=task（任务，1 天~1 个月）按需拆解子任务，宁缺勿碎。
 """
 
 from __future__ import annotations
@@ -16,19 +20,28 @@ SYSTEM_PROMPT = (
 # 解析任务的 JSON 输出契约
 _PARSE_CONTRACT = """输出 JSON 字段定义：
 {
-  "title": "一句话任务名（必填）",
+  "level": "goal|task|subtask"，先按时间尺度判定层级：需要持续 1 个月以上推进的长期目标/项目填 goal；1 天到 1 个月能完成的具体任务填 task；1 天内能完成的小步骤填 subtask；拿不准一律填 task,
+  "title": "一句话任务名/目标名（必填）",
   "priority": "P0|P1|P2|P3，P0=当天/紧急，P1=本周内，P2=本月内，P3=更远；不确定填 null",
   "task_type": "课程|科研|作业|考试|组会|生活|其他",
-  "due_at": "截止时间，ISO 8601 格式如 2026-10-10T23:59:00+08:00；没提到填 null，绝不瞎猜",
+  "due_at": "截止/结束时间，ISO 8601 格式如 2026-10-10T23:59:00+08:00；没提到填 null，绝不瞎猜",
   "estimate_min": "预计耗时（分钟数字），不确定填 null",
   "energy": "高|中|低，按任务难度判断；不确定填 null",
-  "tags": ["标签1", "标签2"]，可空数组，
-  "subtask_needed": true或false，先判断该任务是否有必要拆解子任务：一次动作即可完成（如取快递、回邮件、交表）则为false，多步骤任务为true,
-  "subtasks": ["子任务1", "子任务2"]，按需拆解，宁缺勿碎：subtask_needed为false时必须为空数组，绝不为凑数硬拆；为true时给 2-6 个具体可执行动作，按执行顺序,
+  "tags": ["标签1", "标签2"]，可空数组,
+  "subtask_needed": true或false，先判断该任务是否有必要拆解子任务：一次动作即可完成（如取快递、回邮件、交表）则为false，多步骤任务为true（level=goal 时忽略本字段）,
+  "subtasks": ["子任务1", "子任务2"]，按需拆解，宁缺勿碎：subtask_needed为false时必须为空数组，绝不为凑数硬拆；为true时给 2-6 个具体可执行动作，按执行顺序（level=goal 时留空数组）,
+  "tasks": [{"title": "任务名", "due_at": "截止时间或null", "priority": "P0|P1|P2|P3", "estimate_min": 90, "subtask_needed": false, "subtasks": []}],
+  "key_results": ["关键结果1", "关键结果2"],
+  "description": "补充描述；没有则填空串",
   "checklist": ["完成前要确认的事项1", "…"]，可空数组,
   "confidence": 0.0到1.0之间的小数，表示你对以上解析的把握程度
 }
+层级与拆解规则（必须遵守）：
+1. level=goal 时：tasks 必填，给 2~5 个能推进该目标的 L2 任务（按执行顺序，每项是一整天到数周可完成的具体任务）；key_results 给 2~4 条可验收的关键结果；subtasks 留空数组。
+2. level=task 时：tasks 必须为空数组；再按 subtask_needed 判断是否拆分子任务，宁可少拆也绝不为凑数硬拆成细碎动作。
+3. level=subtask 时：tasks 与 subtasks 都必须为空数组。
 置信度自评标准：描述清晰且关键信息齐全 > 0.7；部分信息需推断 0.4~0.7；描述模糊或几乎无法理解 < 0.4（此时 title 尽量保留原话）。"""
+
 
 
 def build_parse_user_prompt(text: str, now: datetime) -> str:

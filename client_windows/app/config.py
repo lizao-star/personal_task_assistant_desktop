@@ -38,6 +38,7 @@ class FeishuCredential:
     task_table_id: str
     subtask_table_id: str = ""  # 可选：子任务表 table_id（M3 详情页展示子任务用）
     monitor_log_table_id: str = ""  # 可选：娱乐监控日志表 table_id（M4 聚合写日志用）
+    goal_table_id: str = ""  # 可选：目标/项目表 table_id（M4.5 三层任务顶层）
 
     @property
     def is_ready(self) -> bool:
@@ -97,6 +98,7 @@ def load_config() -> AppConfig:
         task_table_id=os.getenv("FEISHU_TASK_TABLE_ID", "").strip(),
         subtask_table_id=os.getenv("FEISHU_SUBTASK_TABLE_ID", "").strip(),
         monitor_log_table_id=os.getenv("FEISHU_MONITOR_LOG_TABLE_ID", "").strip(),
+        goal_table_id=os.getenv("FEISHU_GOAL_TABLE_ID", "").strip(),
     )
     # AI 配置：Key 从 .env 读，其余参数从 settings.yaml 读（可覆盖默认值）
     settings = _load_settings()

@@ -9,9 +9,12 @@ import unittest
 from datetime import datetime
 
 from app.constants import (
+    GOAL_STATUS_DOING,
+    GOAL_STATUS_NOT_STARTED,
     STATUS_DONE,
     STATUS_TODO,
     SYNC_SOURCE_CLIENT,
+    GoalFields,
     MonitorLogFields,
     TaskFields,
 )
@@ -20,6 +23,7 @@ from app.feishu.repository import (
     build_create_fields,
     build_defer_fields,
     build_edit_fields,
+    build_goal_fields,
     build_monitor_log_fields,
     generate_external_id,
 )
@@ -154,6 +158,81 @@ class TestBuildMonitorLogFields(unittest.TestCase):
         self.assertEqual(fields[MonitorLogFields.NOTIFY_COUNT], 3)
         self.assertTrue(fields[MonitorLogFields.CLOSED])
         self.assertEqual(fields[MonitorLogFields.NOTE], "L4 触发")
+
+
+class TestBuildGoalFields(unittest.TestCase):
+    """M4.5：目标/项目表字段构建。"""
+
+    def test_minimal(self):
+        fields = build_goal_fields(title="完成毕业论文", external_id="win-goal01")
+        self.assertEqual(fields[GoalFields.TITLE], "完成毕业论文")
+        self.assertEqual(fields[GoalFields.LEVEL], "月")
+        self.assertEqual(fields[GoalFields.STATUS], GOAL_STATUS_NOT_STARTED)
+        self.assertEqual(fields[GoalFields.SYNC_SOURCE], SYNC_SOURCE_CLIENT)
+        self.assertEqual(fields[GoalFields.EXTERNAL_ID], "win-goal01")
+        # 未给出的可选字段不写入，避免误清空
+        self.assertNotIn(GoalFields.START_AT, fields)
+        self.assertNotIn(GoalFields.END_AT, fields)
+        self.assertNotIn(GoalFields.DESCRIPTION, fields)
+        self.assertNotIn(GoalFields.KEY_RESULTS, fields)
+
+    def test_full(self):
+        start = datetime(2026, 10, 1, 0, 0, 0)
+        end = datetime(2026, 12, 31, 23, 59, 0)
+        fields = build_goal_fields(
+            title="学期科研计划",
+            start_at=start,
+            end_at=end,
+            level="季",
+            status=GOAL_STATUS_DOING,
+            description="按月推进",
+            key_results=["投出一篇论文", "  ", "完成实验"],
+            external_id="win-goal02",
+        )
+        self.assertEqual(fields[GoalFields.START_AT], int(start.timestamp() * 1000))
+        self.assertEqual(fields[GoalFields.END_AT], int(end.timestamp() * 1000))
+        self.assertEqual(fields[GoalFields.LEVEL], "季")
+        self.assertEqual(fields[GoalFields.STATUS], GOAL_STATUS_DOING)
+        # 关键结果拼成多行文本，空项被过滤
+        self.assertEqual(fields[GoalFields.KEY_RESULTS], "- 投出一篇论文\n- 完成实验")
+
+    def test_key_results_accepts_plain_text(self):
+        fields = build_goal_fields(title="x", key_results="已完成开题")
+        self.assertEqual(fields[GoalFields.KEY_RESULTS], "已完成开题")
+
+
+class TestGoalRelationFields(unittest.TestCase):
+    """M4.5：任务与目标、子任务与任务的关联字段。"""
+
+    def test_create_with_goal_record_id(self):
+        fields = build_create_fields(
+            title="写文献综述",
+            due_at=datetime(2026, 10, 20, 18, 0, 0),
+            priority="P1",
+            task_type="科研",
+            external_id="win-task01",
+            goal_record_id="recGoal01",
+        )
+        self.assertEqual(fields[TaskFields.GOAL], ["recGoal01"])
+
+    def test_create_without_goal_omits_field(self):
+        fields = build_create_fields(
+            title="x",
+            due_at=datetime(2026, 10, 20, 18, 0, 0),
+            priority="P2",
+            task_type="其他",
+            external_id="win-task02",
+        )
+        self.assertNotIn(TaskFields.GOAL, fields)
+
+    def test_edit_goal_record_id(self):
+        fields = build_edit_fields({"goal_record_id": "recGoal02"})
+        self.assertEqual(fields[TaskFields.GOAL], ["recGoal02"])
+
+    def test_edit_clear_goal(self):
+        """传空串表示解除关联，应写空数组而非省略。"""
+        fields = build_edit_fields({"goal_record_id": "  "})
+        self.assertEqual(fields[TaskFields.GOAL], [])
 
 
 class TestBuildEditFields(unittest.TestCase):

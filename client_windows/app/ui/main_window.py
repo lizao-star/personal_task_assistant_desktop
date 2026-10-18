@@ -1,6 +1,6 @@
-"""主窗口：展示逾期任务与待办任务，提供新建/完成/延期入口。
+"""主窗口：展示目标计划 + 逾期/待办/收集箱任务，提供新建/完成/延期入口。
 
-数据来源是 (任务, 优先级分数) 列表；网络请求在后台线程完成，
+数据来源是 (任务, 优先级分数) 列表与目标列表；网络请求在后台线程完成，
 本窗口只负责渲染与发出操作信号。
 """
 
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -26,10 +27,9 @@ from PySide6.QtWidgets import (
 )
 
 from ..ai.provider import LLMProvider
-from ..feishu.repository import SubTask, Task
+from ..feishu.repository import Goal, SubTask, Task
 from .task_dialog import NewTaskDialog
 from .detail_dialog import TaskDetailDialog
-from .edit_task_dialog import EditTaskDialog
 from .tray import load_app_icon
 
 # 表格列定义：列名 -> 取值函数
@@ -40,6 +40,23 @@ COLUMNS = [
     ("截止时间", lambda t, s: t.due_at.strftime("%Y-%m-%d %H:%M") if t.due_at else "-"),
     ("类型", lambda t, s: t.task_type or "-"),
     ("分数", lambda t, s: f"{s:.2f}"),
+]
+
+# 目标计划表格列定义（M4.5）：列名 -> 取值函数
+GOAL_COLUMNS = [
+    ("目标名", lambda g: g.title),
+    ("层级", lambda g: g.level or "-"),
+    ("状态", lambda g: g.status or "-"),
+    ("进度", lambda g: f"{g.progress}%"),
+    (
+        "起止时间",
+        lambda g: (
+            (g.start_at.strftime("%m-%d") if g.start_at else "?")
+            + " → "
+            + (g.end_at.strftime("%m-%d") if g.end_at else "?")
+        ),
+    ),
+    ("任务数", lambda g: str(len(g.task_record_ids))),
 ]
 
 
@@ -94,6 +111,44 @@ class TaskTable(QTableWidget):
         if 0 <= row < len(self._row_record_ids):
             return self._row_record_ids[row]
         return ""
+
+
+class GoalTable(QTableWidget):
+    """只读目标计划表格（M4.5）：记录每行的目标 record_id。"""
+
+    def __init__(self):
+        super().__init__(0, len(GOAL_COLUMNS))
+        self.setHorizontalHeaderLabels([name for name, _ in GOAL_COLUMNS])
+        self.verticalHeader().setVisible(False)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setAlternatingRowColors(True)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._row_record_ids: list[str] = []
+        self._goals: list[Goal] = []
+
+    def render(self, goals: list[Goal]) -> None:
+        """用目标列表填充表格，并保留对象引用供双击取用。"""
+        self.clearSelection()
+        self._goals = list(goals)
+        self.setRowCount(len(goals))
+        self._row_record_ids = [g.record_id for g in goals]
+        for row, goal in enumerate(goals):
+            for col, (_, getter) in enumerate(GOAL_COLUMNS):
+                item = QTableWidgetItem(getter(goal))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                # 悬停显示关键结果，不额外占一列
+                if goal.key_results:
+                    item.setToolTip(goal.key_results)
+                self.setItem(row, col, item)
+
+    def goal_from_row(self, row: int) -> Goal | None:
+        """指定行的目标对象；越界返回 None。"""
+        if 0 <= row < len(self._goals):
+            return self._goals[row]
+        return None
 
 
 class DeferDialog(QDialog):
@@ -152,6 +207,8 @@ class MainWindow(QWidget):
         self._ai_threshold = 0.6
         # 最近一次渲染的任务（record_id -> Task），供详情查看
         self._rendered_tasks: dict[str, Task] = {}
+        # 最近一次渲染的目标（供任务详情页的「所属目标」下拉使用）
+        self._rendered_goals: list[Goal] = []
         # 用户最后交互的任务表格，供「完成/延期/详情」定位操作目标
         self._active_table: TaskTable | None = None
         self._build_ui()
@@ -196,6 +253,18 @@ class MainWindow(QWidget):
         self.warning_label.setStyleSheet("color: #b00020; font-weight: bold;")
         self.warning_label.setVisible(False)
         layout.addWidget(self.warning_label)
+
+        # ===== 目标计划区（M4.5：三层任务的最上层，双击查看目标信息） =====
+        self.goal_title = QLabel("🎯 目标计划")
+        f = self.goal_title.font()
+        f.setBold(True)
+        self.goal_title.setFont(f)
+        layout.addWidget(self.goal_title)
+        self.goal_table = GoalTable()
+        layout.addWidget(self.goal_table, stretch=1)
+        self.goal_table.cellDoubleClicked.connect(self._on_goal_double_clicked)
+        # 单击目标行时清掉任务表选中，避免「完成/延期」误作用在旧选中任务上
+        self.goal_table.cellClicked.connect(self._on_goal_focused)
 
         # ===== 逾期任务区（占可用高度约 25%） =====
         self.overdue_title = QLabel("⚠️ 逾期任务")
@@ -255,12 +324,19 @@ class MainWindow(QWidget):
         overdue_scored: list[tuple[Task, float]],
         inbox_scored: list[tuple[Task, float]] | None = None,
         synced_at: datetime | None = None,
+        goals: list[Goal] | None = None,
     ) -> None:
-        """渲染待办/逾期/收集箱三个任务表格。
+        """渲染目标计划 + 待办/逾期/收集箱三个任务表格。
 
         待办列表按优先级分数降序排序后默认折叠，只显示前 N 个最重要的任务，
         其余可通过「展开全部」按钮查看。
         """
+        # 目标计划（M4.5）
+        goals = goals or []
+        self._rendered_goals = list(goals)
+        self.goal_table.render(goals)
+        self.goal_title.setText(f"🎯 目标计划（{len(goals)}）")
+
         # 待办：保存全部 + 按折叠状态切片显示
         self._today_all_scored = today_scored
         self._render_today()
@@ -339,16 +415,19 @@ class MainWindow(QWidget):
         self._ai_threshold = threshold
 
     def show_task_detail(self, task: Task, subtasks: list[SubTask]) -> None:
-        """打开任务详情对话框（由 main.py 提供子任务数据）。"""
+        """打开任务详情对话框（可编辑 + AI 拆解，由 main.py 提供子任务数据）。"""
         dlg = TaskDetailDialog(
             task,
             subtasks,
             parent=self,
             ai_provider=self._ai_provider,
             ai_threshold=self._ai_threshold,
+            goals=self._rendered_goals,
         )
         # 采纳 AI 拆解建议 → 转发给 main.py 走离线队列写表
         dlg.apply_requested.connect(self.breakdown_apply_requested.emit)
+        # 详情页内的编辑保存 → 走既有的编辑写回链路
+        dlg.save_requested.connect(self.edit_requested.emit)
         dlg.exec()
 
     # ------------------------------------------------------------------
@@ -393,9 +472,16 @@ class MainWindow(QWidget):
         if not isinstance(table, TaskTable):
             return
         self._active_table = table
+        self.goal_table.clearSelection()
         for other in (self.today_table, self.overdue_table, self.inbox_table):
             if other is not table:
                 other.clearSelection()
+
+    def _on_goal_focused(self, _row: int, _col: int) -> None:
+        """点击目标行后清空任务表的选中，避免操作错行。"""
+        self._active_table = None
+        for table in (self.today_table, self.overdue_table, self.inbox_table):
+            table.clearSelection()
 
     def _on_detail(self) -> None:
         """详情按钮：对当前选中行发出查看详情信号。"""
@@ -404,24 +490,35 @@ class MainWindow(QWidget):
             self.detail_requested.emit(rid)
 
     def _on_row_double_clicked(self, row: int, _col: int) -> None:
-        """双击任务行：打开编辑对话框，确认后发出编辑信号。
-
-        编辑对象取自本轮渲染缓存（_rendered_tasks），未改动任何字段时不发信号。
-        """
+        """双击任务行：打开可编辑的任务详情页（含 AI 拆解）。"""
         table = self.sender()
         if not isinstance(table, TaskTable):
             return
         rid = table.selected_record_id_from_row(row)
-        if not rid:
+        if rid:
+            self.detail_requested.emit(rid)
+
+    def _on_goal_double_clicked(self, row: int, _col: int) -> None:
+        """双击目标行：只读展示目标信息（本期不做目标编辑写回）。"""
+        goal = self.goal_table.goal_from_row(row)
+        if goal is None:
             return
-        task = self._rendered_tasks.get(rid)
-        if task is None:
-            return
-        dlg = EditTaskDialog(task, self)
-        if dlg.exec() == QDialog.Accepted:
-            changes = dlg.result_changes()
-            if changes:
-                self.edit_requested.emit({"record_id": rid, "changes": changes})
+        lines = [
+            f"层级：{goal.level or '-'}    状态：{goal.status or '-'}    进度：{goal.progress}%",
+            f"起止：{goal.start_at.strftime('%Y-%m-%d') if goal.start_at else '?'}"
+            f" → {goal.end_at.strftime('%Y-%m-%d') if goal.end_at else '?'}",
+            f"关联任务：{len(goal.task_record_ids)} 个",
+        ]
+        if goal.description:
+            lines.append(f"\n描述：\n{goal.description}")
+        if goal.key_results:
+            lines.append(f"\n关键结果：\n{goal.key_results}")
+        box = QMessageBox(self)
+        box.setWindowTitle("目标详情")
+        box.setText(goal.title)
+        box.setInformativeText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def _on_complete(self) -> None:
         rid = self._current_selected_record_id()

@@ -58,6 +58,33 @@ class SubtaskFields:
     AI_HINT = "AI提示"
 
 
+class GoalFields:
+    """目标/项目表字段名（M4.5：三层任务的最上层，必须与表格列名一致）。"""
+
+    TITLE = "目标名"
+    LEVEL = "层级"
+    START_AT = "开始时间"
+    END_AT = "结束时间"
+    STATUS = "状态"
+    DESCRIPTION = "描述"
+    KEY_RESULTS = "关键结果"
+    TASKS = "关联任务"
+    PROGRESS = "进度"
+    REVIEW = "复盘"
+
+    # 与任务表共用「外部ID / 同步来源 / 修改时间」列（幂等与冲突检测）
+    EXTERNAL_ID = "外部ID"
+    SYNC_SOURCE = "同步来源"
+    UPDATED_AT = "修改时间"
+
+
+# ===== 层级（AI 判定结果，M4.5） =====
+LEVEL_GOAL = "goal"        # L1 目标/项目：1 个月以上
+LEVEL_TASK = "task"        # L2 任务：1 天 ~ 1 个月
+LEVEL_SUBTASK = "subtask"  # L3 子任务：1 天内
+LEVEL_OPTIONS = [LEVEL_GOAL, LEVEL_TASK, LEVEL_SUBTASK]
+
+
 # ===== 状态选项 =====
 STATUS_INBOX = "收集箱"
 STATUS_TODO = "待办"
@@ -85,6 +112,23 @@ PRIORITY_OPTIONS = ["P0", "P1", "P2", "P3"]
 
 # ===== 任务类型选项（建任务表单用） =====
 TASK_TYPE_OPTIONS = ["课程", "科研", "作业", "考试", "组会", "生活", "其他"]
+
+# ===== 目标/项目表选项（M4.5） =====
+GOAL_LEVEL_OPTIONS = ["年", "季", "月", "周"]
+GOAL_STATUS_NOT_STARTED = "未开始"
+GOAL_STATUS_DOING = "进行中"
+GOAL_STATUS_DONE = "已完成"
+GOAL_STATUS_PAUSED = "暂停"
+GOAL_STATUS_CANCELLED = "取消"
+GOAL_STATUS_OPTIONS = [
+    GOAL_STATUS_NOT_STARTED,
+    GOAL_STATUS_DOING,
+    GOAL_STATUS_DONE,
+    GOAL_STATUS_PAUSED,
+    GOAL_STATUS_CANCELLED,
+]
+# 视为已结束的目标状态（不参与目标区展示的「活跃」筛选）
+GOAL_FINISHED_STATUSES = {GOAL_STATUS_DONE, GOAL_STATUS_CANCELLED}
 
 # ===== 同步来源选项 =====
 SYNC_SOURCE_CLIENT = "客户端"

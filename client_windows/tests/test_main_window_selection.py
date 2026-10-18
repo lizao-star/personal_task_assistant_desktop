@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from app.feishu.repository import Task  # noqa: E402
+from app.feishu.repository import Goal, Task  # noqa: E402
 from app.ui.main_window import MainWindow, TaskTable  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
@@ -84,58 +84,97 @@ class CurrentSelectionTargetTest(unittest.TestCase):
         self.assertEqual(self.window._current_selected_record_id(), "")
 
 
-class DoubleClickEditTest(unittest.TestCase):
-    """双击任务行应打开编辑对话框并发出 edit_requested 信号（M5）。"""
+class GoalTableTest(unittest.TestCase):
+    """目标计划表格（M4.5）：渲染与按行取目标对象。"""
+
+    def setUp(self):
+        from app.ui.main_window import GoalTable
+
+        self.table = GoalTable()
+        self.goal = Goal(record_id="g1", title="毕业论文", level="月", progress=40,
+                         task_record_ids=["t1", "t2"])
+        self.table.render([self.goal])
+
+    def test_render_shows_title_and_task_count(self):
+        self.assertEqual(self.table.item(0, 0).text(), "毕业论文")
+        self.assertEqual(self.table.item(0, 3).text(), "40%")
+        self.assertEqual(self.table.item(0, 5).text(), "2")
+
+    def test_goal_from_row(self):
+        self.assertIs(self.table.goal_from_row(0), self.goal)
+        self.assertIsNone(self.table.goal_from_row(9))
+
+
+class DoubleClickDetailTest(unittest.TestCase):
+    """双击任务行应打开可编辑详情页（M4.5：编辑与详情合并）。"""
 
     def setUp(self):
         self.window = MainWindow()
         self.overdue = make_task("overdue-2", "逾期任务2")
         self.window.render([], [(self.overdue, 1.0)], [])
-        self.emitted: list[dict] = []
-        self.window.edit_requested.connect(self.emitted.append)
+        self.detail_ids: list[str] = []
+        self.window.detail_requested.connect(self.detail_ids.append)
 
     def tearDown(self):
         self.window.close()
 
-    def test_double_click_emits_edit(self):
-        """双击后若对话框返回变更，应带 record_id + changes 发信号。"""
+    def test_double_click_emits_detail(self):
+        """双击行 → 发出 detail_requested(record_id)，由 main.py 组装数据后弹详情页。"""
+        self.window.overdue_table.cellDoubleClicked.emit(0, 0)
+        self.assertEqual(self.detail_ids, ["overdue-2"])
+
+    def test_double_click_out_of_range_no_signal(self):
+        """越界行不应发出信号。"""
+        self.window.overdue_table.cellDoubleClicked.emit(99, 0)
+        self.assertEqual(self.detail_ids, [])
+
+
+class DetailSaveWiringTest(unittest.TestCase):
+    """详情页内的「保存修改」应转成 edit_requested，走既有写回链路。"""
+
+    def setUp(self):
+        self.window = MainWindow()
+        self.task = make_task("r1", "任务一")
+        self.window.render([(self.task, 1.0)], [], [])
+        self.edits: list[dict] = []
+        self.window.edit_requested.connect(self.edits.append)
+
+    def tearDown(self):
+        self.window.close()
+
+    def test_save_requested_forwards_to_edit(self):
         from unittest.mock import patch
 
-        fake = _FakeEditDialog(changes={"title": "改后的标题"})
-        with patch(
-            "app.ui.main_window.EditTaskDialog", return_value=fake
-        ):
-            # 通过信号触发，保证槽内 self.sender() 能拿到表格
-            self.window.overdue_table.cellDoubleClicked.emit(0, 0)
-        self.assertEqual(len(self.emitted), 1)
-        self.assertEqual(self.emitted[0]["record_id"], "overdue-2")
-        self.assertEqual(self.emitted[0]["changes"], {"title": "改后的标题"})
-
-    def test_double_click_no_changes_no_signal(self):
-        """未改动任何字段时不应发信号，避免无谓写回。"""
-        from unittest.mock import patch
-
-        fake = _FakeEditDialog(changes={})
-        with patch(
-            "app.ui.main_window.EditTaskDialog", return_value=fake
-        ):
-            self.window.overdue_table.cellDoubleClicked.emit(0, 0)
-        self.assertEqual(self.emitted, [])
+        fake = _FakeDetailDialog()
+        with patch("app.ui.main_window.TaskDetailDialog", return_value=fake):
+            self.window.show_task_detail(self.task, [])
+        fake.save_requested.emit(
+            {"record_id": "r1", "changes": {"title": "改后的标题"}}
+        )
+        self.assertEqual(
+            self.edits,
+            [{"record_id": "r1", "changes": {"title": "改后的标题"}}],
+        )
 
 
-class _FakeEditDialog:
-    """替身编辑对话框：绕过真实 QDialog，只回放预设结果。"""
+class _FakeDetailDialog:
+    """替身详情对话框：只提供信号，绕过真实 QDialog。"""
 
-    def __init__(self, changes: dict):
-        self._changes = changes
+    def __init__(self):
+        from PySide6.QtCore import QObject, Signal
+
+        class _Signals(QObject):
+            apply_requested = Signal(dict)
+            save_requested = Signal(dict)
+
+        self._signals = _Signals()
+        self.apply_requested = self._signals.apply_requested
+        self.save_requested = self._signals.save_requested
 
     def exec(self):
         from PySide6.QtWidgets import QDialog
 
-        return QDialog.Accepted
-
-    def result_changes(self) -> dict:
-        return self._changes
+        return QDialog.Rejected
 
 
 if __name__ == "__main__":

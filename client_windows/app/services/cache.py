@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..feishu.repository import SubTask, Task
+from ..feishu.repository import Goal, SubTask, Task
 
 
 @dataclass
@@ -116,6 +116,16 @@ class LocalCache:
                 log_id    INTEGER PRIMARY KEY AUTOINCREMENT,
                 payload   TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        # 目标/项目快照（M4.5）：主窗口「目标计划」区展示用，每次同步整体替换
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goal_cache (
+                record_id  TEXT PRIMARY KEY,
+                payload    TEXT NOT NULL,
+                cached_at  TEXT NOT NULL
             )
             """
         )
@@ -226,6 +236,42 @@ class LocalCache:
                 data[key] = datetime.fromisoformat(value) if value else None
             subtasks.append(SubTask(**data))
         return subtasks
+
+    # ------------------------------------------------------------------
+    # 目标/项目缓存（M4.5）
+    # ------------------------------------------------------------------
+    def replace_goals(self, goals: list[Goal]) -> None:
+        """用最新目标列表整体替换本地快照。"""
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM goal_cache")
+            cur.executemany(
+                "INSERT INTO goal_cache(record_id, payload, cached_at) VALUES (?,?,?)",
+                [
+                    (
+                        goal.record_id,
+                        json.dumps(asdict(goal), ensure_ascii=False, default=_json_default),
+                        now_iso,
+                    )
+                    for goal in goals
+                ],
+            )
+            self._conn.commit()
+
+    def load_goals(self) -> list[Goal]:
+        """读取本地缓存的全部目标。"""
+        with self._lock:
+            cur = self._conn.execute("SELECT payload FROM goal_cache")
+            rows = cur.fetchall()
+        goals: list[Goal] = []
+        for (payload,) in rows:
+            data = json.loads(payload)
+            for key in ("start_at", "end_at", "modified_at"):
+                value = data.get(key)
+                data[key] = datetime.fromisoformat(value) if value else None
+            goals.append(Goal(**data))
+        return goals
 
     # ------------------------------------------------------------------
     # 离线操作队列（M2）

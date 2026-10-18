@@ -413,6 +413,41 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 > 一次动作可完成的简单任务（取快递/回邮件等）`subtask_needed=false` 且 `subtasks` 为空，
 > 避免「为凑数硬拆细碎子任务」。`subtask_needed` 为中间决策字段，parser 解析时忽略。
 
+### 三层任务契约（M4.5，已实现）
+
+按 [设计总纲.md](设计总纲.md) 4.0 三层任务体系，解析契约扩展 `level` 字段：
+
+- `level`：`goal | task | subtask`，按时间尺度判定——目标项目表（1 个月以上）/ 任务表（1 天~1 个月）/ 子任务表（1 天内）；判不准一律 `task`。
+- `level=goal` 时额外输出 `tasks` 数组（目标向下拆解为 L2 任务，每项可再带 `subtasks`），以及可选的 `description` / `key_results`：
+
+```json
+{
+  "level": "goal",
+  "title": "研一结束前完成小论文初稿",
+  "description": "12 月底前投出",
+  "key_results": ["完成文献综述", "完成实验", "写完初稿"],
+  "tasks": [
+    { "title": "完成文献综述", "due_at": "2026-11-15T23:59:00+08:00",
+      "priority": "P1", "estimate_min": 600,
+      "subtasks": ["检索 20 篇文献", "写综述初稿"] },
+    { "title": "完成实验设计与数据采集", "due_at": "2026-12-20T23:59:00+08:00", "subtasks": [] }
+  ],
+  "confidence": 0.78
+}
+```
+
+**校验规则（`parser.normalize_task`）**：
+
+| 场景                        | 处理                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `level=goal` 且 `tasks` ≥ 2 | 保留 goal，`tasks` 最多 5 个，单任务 `subtasks` 最多 6 条                     |
+| `level=goal` 但 `tasks` < 2 | **降级为 task**，清空 `tasks`，`confidence` 压到 ≤ 0.4 → 写入收集箱待人工确认 |
+| `level` 缺失或非法          | 一律按 `task` 处理，不硬猜层级                                                |
+| `level=subtask`             | 不再向下拆解，`tasks` 与 `subtasks` 均清空                                    |
+| `subtask_needed=false`      | 清空 `subtasks`（宁缺勿碎，防模型凑数硬拆）                                   |
+
+落表顺序：先建目标拿 record_id → 建任务带「所属目标」关联 → 建子任务带「所属任务」关联；中途失败保留已写入部分，失败部分走离线队列重试（`goal_create` op，按「外部ID」幂等）。
+
 拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`。
 
 ### 校验与容错（parser.py）
@@ -586,59 +621,103 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 回归测试：`tests/test_main_window_selection.py`（8 个用例）。
 
-## 14. 编辑任务（M2 写回扩展，新增）
+## 14. 任务详情（M4.5：详情 + 编辑 + AI 拆解三合一）
 
-一期方案：**双击任务行直接编辑字段**（任务详情仍由顶部「详情」按钮进入）。所有在客户端可见的任务（待办/逾期/收集箱）均可编辑，无需跳转飞书。
+M4.5 起**编辑对话框与详情对话框合并**：双击任务行直接打开可编辑详情页（顶部「详情」按钮进入同一对话框）。所有在客户端可见的任务（待办/逾期/收集箱）均可编辑，无需跳转飞书；原 `ui/edit_task_dialog.py` 已删除。
 
 ### 14.1 交互链路
 
 ```
-双击任务行 → EditTaskDialog（预填当前值）
-  → 用户改字段 →「确定」→ result_changes() 只产出「真正改动」的键
-  → MainWindow.edit_requested({"record_id", "changes"})
-  → main._on_edit：build_edit_fields(changes) → enqueue_op("edit") → 乐观更新本地缓存 + 立即重渲染
-  → start_incremental_sync → SyncService.push_pending → _push_one("edit") → update_task()
+双击任务行（或选中后点「详情」）→ TaskDetailDialog（预填当前值 + 子任务 + 目标下拉）
+  ├─ 改字段 →「保存修改」→ result_changes() 只产出「真正改动」的键
+  │   → MainWindow.edit_requested({"record_id", "changes"})
+  │   → main._on_edit：build_edit_fields(changes) → enqueue_op("edit") → 乐观更新 + 重渲染
+  │   → start_incremental_sync → SyncService.push_pending → _push_one("edit") → update_task()
+  └─ 点「AI 拆解此任务」→ 后台线程请求 → 预览建议 →「采纳」发 apply_requested
+      （对话框不关闭，可继续手工调整）→ enqueue_op("ai_breakdown")
 ```
 
 复用 M2 写回链路（离线队列 + `base_ms` 冲突检测 + 失败重试），编辑无需单独实现这些能力。
 
-### 14.2 可编辑字段（14 项）
+### 14.2 可编辑字段（14 项 + 所属目标）
 
-| 界面控件 | changes 键       | 飞书字段     | 写入格式                     |
-| -------- | ---------------- | ------------ | ---------------------------- |
-| 任务名   | `title`          | 任务名       | 文本（空串校验不通过）       |
-| 状态     | `status`         | 状态         | 单选文本（`STATUS_OPTIONS`） |
-| 优先级   | `priority`       | 优先级       | 单选文本                     |
-| 任务类型 | `task_type`      | 任务类型     | 单选文本                     |
-| 截止时间 | `due_at`         | 截止时间     | 毫秒时间戳 / 空              |
-| 开始时间 | `start_at`       | 开始时间     | 毫秒时间戳 / 空              |
-| 预计耗时 | `estimate_min`   | 预计耗时(分) | 整数（空按 0）               |
-| 精力需求 | `energy`         | 精力需求     | 单选文本（含「未设置」空）   |
-| 语音提醒 | `voice`          | 语音提醒     | 布尔                         |
-| 标签     | `tags`           | 标签         | 多选 `list[str]`             |
-| 描述     | `description`    | 描述         | 文本                         |
-| 提醒规则 | `reminder_rules` | 提醒规则     | 多选 `list[str]`             |
-| AI 拆解  | `ai_breakdown`   | AI拆解       | 文本（多行，可留空）         |
-| 检查清单 | `checklist`      | 检查清单     | 文本（多行，可留空）         |
+| 界面控件 | changes 键       | 飞书字段     | 写入格式                                |
+| -------- | ---------------- | ------------ | --------------------------------------- |
+| 任务名   | `title`          | 任务名       | 文本（空串校验不通过）                  |
+| 状态     | `status`         | 状态         | 单选文本（`STATUS_OPTIONS`）            |
+| 优先级   | `priority`       | 优先级       | 单选文本                                |
+| 任务类型 | `task_type`      | 任务类型     | 单选文本                                |
+| 所属目标 | `goal_record_id` | 所属目标     | 关联 `list[record_id]` / 空数组（M4.5） |
+| 截止时间 | `due_at`         | 截止时间     | 毫秒时间戳 / 空                         |
+| 开始时间 | `start_at`       | 开始时间     | 毫秒时间戳 / 空                         |
+| 预计耗时 | `estimate_min`   | 预计耗时(分) | 整数（空按 0）                          |
+| 精力需求 | `energy`         | 精力需求     | 单选文本（含「未设置」空）              |
+| 语音提醒 | `voice`          | 语音提醒     | 布尔                                    |
+| 标签     | `tags`           | 标签         | 多选 `list[str]`                        |
+| 描述     | `description`    | 描述         | 文本                                    |
+| 提醒规则 | `reminder_rules` | 提醒规则     | 多选 `list[str]`                        |
+| AI 拆解  | `ai_breakdown`   | AI拆解       | 文本（多行，可留空）                    |
+| 检查清单 | `checklist`      | 检查清单     | 文本（多行，可留空）                    |
 
-> AI 拆解 / 检查清单为详情页展示字段，一并纳入编辑（可手工修改或清空）。
+> 详情页只读展示：子任务表（顺序/子任务名/状态/截止时间）。
+> 原顶部「状态概要」一行（状态/优先级/截止/类型/精力/延期次数/子任务进度）已移除——这些字段在下方表单里均已可编辑，重复展示属于冗余信息。
 > 一期不含「实际耗时 / 重复规则 / 链接」等需扩展 `Task` 数据类的字段。
 
 ### 14.3 清空与联动语义
 
 - **日期清空**：日期控件旁带「清空」勾选框，勾选后控件禁用，`changes` 中该键置 `None`，`build_edit_fields` 写飞书为 `null`。
 - **多选清空**：全部取消勾选 → `changes` 中该键为 `[]`，飞书写空数组。
+- **所属目标清空**：下拉选「（不关联）」→ `goal_record_id=""` → `build_edit_fields` 写空数组解除关联。
 - **单选/文本清空**：精力需求选「未设置」→ 空串。
 - **状态联动完成时间**：`status == 已完成` 时，`build_edit_fields` 自动补 `完成时间`；若 `changes` 显式带 `completed_at` 则优先使用，否则取 `now()`。非完成状态不写完成时间。
 - **最小写入**：`build_edit_fields` 只输出 `changes` 中出现的键，未改动列一律不动，避免误清空。
 
 ### 14.4 关键实现位置
 
-- 对话框：[ui/edit_task_dialog.py](../client_windows/app/ui/edit_task_dialog.py)（`EditTaskDialog`，`result_changes()`）
+- 对话框：[ui/detail_dialog.py](../client_windows/app/ui/detail_dialog.py)（`TaskDetailDialog`，`result_changes()` / `apply_requested` / `save_requested`）
 - 字段构造：[feishu/repository.py](../client_windows/app/feishu/repository.py) 的 `build_edit_fields(changes)`
-- 信号接线：[ui/main_window.py](../client_windows/app/ui/main_window.py)（`edit_requested` + `_on_row_double_clicked`）、[app/main.py](../client_windows/app/main.py)（`_on_edit`）
-- 队列放行：[services/sync.py](../client_windows/app/services/sync.py)（`_push_one` 的 `edit` 分支 + `OP_LABELS`）
-- 单测：`tests/test_write_fields.py`（`TestBuildEditFields`）、`tests/test_main_window_selection.py`（`DoubleClickEditTest`）
+- 信号接线：[ui/main_window.py](../client_windows/app/ui/main_window.py)（`edit_requested` / `detail_requested` / `breakdown_apply_requested` + `_on_row_double_clicked`）、[app/main.py](../client_windows/app/main.py)（`_on_edit` / `_on_apply_breakdown`）
+- 队列放行：[services/sync.py](../client_windows/app/services/sync.py)（`_push_one` 的 `edit` / `ai_breakdown` 分支 + `OP_LABELS`）
+- 单测：`tests/test_write_fields.py`（`TestBuildEditFields` / `TestGoalRelationFields`）、`tests/test_main_window_selection.py`（`DoubleClickDetailTest` / `DetailSaveWiringTest` / `GoalTableTest`）
+
+## 14A. 目标计划区与目标级写入（M4.5）
+
+### 14A.1 界面
+
+主窗口顶部新增「🎯 目标计划（N）」只读表格，列为：目标名 / 层级 / 状态 / 进度 / 起止时间 / 任务数。
+数据来源为本地 `goal_cache`（拉取自飞书「目标/项目表」），并用任务表正向关联回填任务数（`attach_goal_tasks`）。
+双击目标行弹只读信息框（层级/状态/进度/起止/任务数/描述/关键结果）；本期不做目标编辑写回。
+点击目标行会清除三张任务表的选中，避免「完成/延期」误作用在旧选中任务上。
+
+### 14A.2 写入链路
+
+```
+新建任务对话框（layer=目标）→ MainWindow.create_requested(payload)
+  → main._on_create：payload["level"] == "goal"
+  → 生成 goal_external_id + build_goal_fields(...)
+  → 每个拆解任务生成独立 external_id + build_create_fields(...)
+  → enqueue_op("goal_create", {external_id, fields, tasks:[{external_id, fields, subtasks}]})
+  → SyncService.push_pending → _push_goal_create：
+      1) find_goal_by_external_id 查重（幂等）
+      2) create_goal 拿 record_id
+      3) 逐个 create_task（fields 已含「所属目标」关联）
+      4) 写子任务（带「所属任务」关联）
+```
+
+### 14A.3 目标字段映射
+
+| 输入键        | 飞书字段（`GoalFields`） | 写入格式                                 |
+| ------------- | ------------------------ | ---------------------------------------- |
+| `title`       | 目标名                   | 文本（必填）                             |
+| `level`       | 层级                     | 单选（年/季/月/周，默认月）              |
+| `start_at`    | 开始时间                 | 毫秒时间戳 / 不写                        |
+| `end_at`      | 结束时间                 | 毫秒时间戳 / 不写                        |
+| `description` | 描述                     | 文本 / 不写                              |
+| `key_results` | 关键结果                 | `list[str]` 拼成 `- xxx` 多行文本 / 不写 |
+| `external_id` | 外部ID                   | 文本（幂等键）                           |
+| （固定）      | 同步来源                 | 单选「客户端」                           |
+
+> 目标表需手工新增 `外部ID`（文本）、`同步来源`（单选）、`修改时间`（日期）三列，否则幂等与增量同步失效。
 
 ## 15. 任务栏图标与开机自启
 

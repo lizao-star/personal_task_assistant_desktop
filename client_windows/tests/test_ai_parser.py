@@ -150,6 +150,87 @@ class TestNormalizeTask(unittest.TestCase):
         self.assertEqual(draft.priority, "P2")
 
 
+class TestNormalizeLevel(unittest.TestCase):
+    """M4.5：层级判定与目标级拆解校验。"""
+
+    def test_goal_keeps_tasks(self):
+        data = {
+            "title": "完成毕业论文初稿",
+            "level": "goal",
+            "description": "12 月底前完成",
+            "key_results": ["完成文献综述", "完成实验", "", "写完初稿"],
+            "tasks": [
+                {"title": "写文献综述", "priority": "P1", "estimate_min": 600},
+                {"title": "跑完实验并整理数据"},
+                {"title": ""},  # 空标题被过滤
+            ],
+            "confidence": 0.9,
+        }
+        draft = normalize_task(data, 0.6)
+        self.assertTrue(draft.is_goal)
+        self.assertEqual(len(draft.tasks), 2)
+        self.assertEqual(draft.tasks[0].title, "写文献综述")
+        self.assertEqual(draft.tasks[0].priority, "P1")
+        self.assertEqual(draft.tasks[1].priority, "P2")
+        # 关键结果最多 4 条且去掉空项
+        self.assertEqual(draft.key_results, ["完成文献综述", "完成实验", "写完初稿"])
+        self.assertEqual(draft.description, "12 月底前完成")
+
+    def test_goal_without_enough_tasks_downgraded(self):
+        """目标必须拆解：不足 2 个任务 → 降级为 task 且低置信度待确认。"""
+        data = {
+            "title": "学完机器学习",
+            "level": "goal",
+            "tasks": [{"title": "只看一个视频"}],
+            "confidence": 0.95,
+        }
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.level, "task")
+        self.assertEqual(draft.tasks, [])
+        self.assertLessEqual(draft.confidence, 0.4)
+        self.assertTrue(draft.needs_review)
+        self.assertEqual(draft.status_hint, STATUS_INBOX)
+
+    def test_unknown_level_falls_back_to_task(self):
+        draft = normalize_task({"title": "x", "level": "project"}, 0.6)
+        self.assertEqual(draft.level, "task")
+
+    def test_subtask_level_never_breaks_down(self):
+        data = {
+            "title": "改参考文献格式",
+            "level": "subtask",
+            "subtasks": ["改正文", "改编号"],
+            "tasks": [{"title": "a"}, {"title": "b"}],
+        }
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.level, "subtask")
+        self.assertEqual(draft.subtasks, [])
+        self.assertEqual(draft.tasks, [])
+
+    def test_subtask_needed_false_clears_subtasks(self):
+        """明确不需要拆时清空，避免模型硬凑细碎任务。"""
+        data = dict(GOOD_OUTPUT, subtask_needed=False)
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.subtasks, [])
+
+    def test_subtask_needed_true_keeps_subtasks(self):
+        data = dict(GOOD_OUTPUT, subtask_needed=True)
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.subtasks, GOOD_OUTPUT["subtasks"])
+
+    def test_goal_task_subtasks_clamped(self):
+        data = {
+            "title": "目标",
+            "level": "goal",
+            "tasks": [
+                {"title": "任务A", "subtasks": [f"步骤{i}" for i in range(10)]},
+                {"title": "任务B"},
+            ],
+        }
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(len(draft.tasks[0].subtasks), 6)
+
+
 class TestTitleOnlyDraft(unittest.TestCase):
     """规则兜底。"""
 

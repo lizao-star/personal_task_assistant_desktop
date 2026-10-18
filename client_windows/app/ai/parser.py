@@ -1,14 +1,18 @@
-"""AI 输出解析与校验（M3）。
+"""AI 输出解析与校验（M3 / M4.5）。
 
-职责（对齐路线图 M3 第 3、4 条）：
+职责（对齐路线图 M3 第 3、4 条、M4.5 第 2 条）：
 1. JSON 解析：容错处理模型输出（剥 Markdown 围栏等）；
 2. Schema 校验与归一化：字段类型/取值范围钳制，非法值回落默认；
 3. 失败重试 1 次；仍失败退化为「只取标题」的规则兜底，程序不崩；
 4. 置信度策略：confidence < 阈值(默认 0.6) → 写入「收集箱」待人工确认，
-   不自动定优先级（用最保守的 P2 占位）。
+   不自动定优先级（用最保守的 P2 占位）；
+5. M4.5 层级判定：level=goal 时校验 tasks（2~5 个 L2 任务），
+   缺失拆解则降级为 task 并按低置信度进收集箱；task 层级按
+   subtask_needed 决定是否拆子任务，宁缺勿碎。
 
 本模块是纯逻辑（除调用 provider 外无 IO），配单元测试。
 """
+
 
 from __future__ import annotations
 
@@ -22,6 +26,10 @@ from ..constants import (
     ENERGY_HIGH,
     ENERGY_LOW,
     ENERGY_MEDIUM,
+    LEVEL_GOAL,
+    LEVEL_OPTIONS,
+    LEVEL_SUBTASK,
+    LEVEL_TASK,
     PRIORITY_OPTIONS,
     STATUS_INBOX,
     STATUS_TODO,
@@ -42,6 +50,17 @@ _VALID_ENERGY = {ENERGY_HIGH, ENERGY_MEDIUM, ENERGY_LOW}
 # 领域对象
 # ----------------------------------------------------------------------
 @dataclass
+class GoalTaskDraft:
+    """目标级拆解出的 L2 任务草稿（M4.5，尚未写表）。"""
+
+    title: str
+    due_at: datetime | None = None
+    priority: str = "P2"
+    estimate_min: int = 0
+    subtasks: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TaskDraft:
     """AI 解析出的任务草稿（尚未写表）。"""
 
@@ -60,6 +79,16 @@ class TaskDraft:
     needs_review: bool = False
     # 是否走了「只取标题」规则兜底（用于 UI 提示）
     is_fallback: bool = False
+    # M4.5：AI 判定的层级（goal/task/subtask）与目标级拆解草稿
+    level: str = LEVEL_TASK
+    tasks: list[GoalTaskDraft] = field(default_factory=list)
+    key_results: list[str] = field(default_factory=list)
+    description: str = ""
+
+    @property
+    def is_goal(self) -> bool:
+        """是否按目标（L1）处理。"""
+        return self.level == LEVEL_GOAL
 
 
 @dataclass
@@ -125,10 +154,60 @@ def _clean_str_list(value) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _clean_bool(value) -> bool | None:
+    """把模型给的布尔值归一化；无法判断时返回 None（视为未表态）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "yes", "1", "是"):
+            return True
+        if text in ("false", "no", "0", "否"):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
+
+
+def _normalize_goal_tasks(value) -> list[GoalTaskDraft]:
+    """校验目标级拆解出的任务数组：过滤无标题项，最多保留 5 个。"""
+    if not isinstance(value, list):
+        return []
+    tasks: list[GoalTaskDraft] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        priority = str(item.get("priority") or "").strip().upper()
+        if priority not in PRIORITY_OPTIONS:
+            priority = "P2"
+        try:
+            estimate = int(float(item.get("estimate_min") or 0))
+        except (TypeError, ValueError):
+            estimate = 0
+        tasks.append(
+            GoalTaskDraft(
+                title=title,
+                due_at=_parse_due(item.get("due_at")),
+                priority=priority,
+                estimate_min=max(0, min(estimate, 24 * 60)),
+                # 目标下的任务也可以再带子任务，同样宁缺勿碎
+                subtasks=_clean_str_list(item.get("subtasks"))[:6],
+            )
+        )
+        if len(tasks) >= 5:
+            break
+    return tasks
+
+
 def normalize_task(data: dict, threshold: float) -> TaskDraft:
     """把 AI 返回的 dict 校验并归一化为 TaskDraft。
 
     非法值一律回落保守默认，不抛异常（解析容错）。
+    M4.5：同时校验层级；goal 缺少拆解时降级为 task 并强制进收集箱，
+    保证「目标基本必须拆解」这条规则不被模型忽略。
     """
     title = str(data.get("title") or "").strip()
     if not title:
@@ -158,6 +237,30 @@ def normalize_task(data: dict, threshold: float) -> TaskDraft:
         confidence = 0.0
     confidence = max(0.0, min(confidence, 1.0))
 
+    # ----- M4.5：层级与拆解校验 -----
+    level = str(data.get("level") or "").strip().lower()
+    if level not in LEVEL_OPTIONS:
+        # 判不准或模型没给：一律按普通任务处理，不硬猜层级
+        level = LEVEL_TASK
+
+    tasks = _normalize_goal_tasks(data.get("tasks"))
+    if level == LEVEL_GOAL and len(tasks) < 2:
+        # 目标必须向下拆解：拆解缺失视为字段残缺 → 降级为任务并待人工确认
+        logger.warning("AI 判定为 goal 但拆解任务不足 2 个，已降级为 task 待确认")
+        level = LEVEL_TASK
+        tasks = []
+        confidence = min(confidence, 0.4)
+
+    if level == LEVEL_SUBTASK:
+        # 子任务层不再向下拆解
+        tasks = []
+        raw_subtasks: list[str] = []
+    else:
+        needed = _clean_bool(data.get("subtask_needed"))
+        cleaned_subtasks = _clean_str_list(data.get("subtasks"))[:6]
+        # 明确说「不需要拆」时清空，避免模型为凑数硬拆细碎动作
+        raw_subtasks = [] if needed is False else cleaned_subtasks
+
     # 置信度策略：低置信 → 收集箱 + 待人工确认，不自动定优先级（保守 P2 占位）
     needs_review = confidence < threshold
     if needs_review:
@@ -171,11 +274,15 @@ def normalize_task(data: dict, threshold: float) -> TaskDraft:
         energy=energy,
         estimate_min=estimate,
         tags=_clean_str_list(data.get("tags")),
-        subtasks=_clean_str_list(data.get("subtasks")),
+        subtasks=raw_subtasks,
         checklist=_clean_str_list(data.get("checklist")),
         confidence=confidence,
         status_hint=STATUS_INBOX if needs_review else STATUS_TODO,
         needs_review=needs_review,
+        level=level,
+        tasks=tasks,
+        key_results=_clean_str_list(data.get("key_results"))[:4],
+        description=str(data.get("description") or "").strip(),
     )
 
 
@@ -193,6 +300,7 @@ def title_only_draft(text: str) -> TaskDraft:
         status_hint=STATUS_INBOX,
         needs_review=True,
         is_fallback=True,
+        level=LEVEL_TASK,
     )
 
 
