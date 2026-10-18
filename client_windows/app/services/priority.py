@@ -37,7 +37,14 @@ DELAY_PENALTY_PER_TIME = 0.02
 # 单因子计算
 # ----------------------------------------------------------------------
 def urgency(due_at: datetime | None, now: datetime) -> float:
-    """截止紧迫度：越接近截止分数越高，无截止时间给中性偏低分。"""
+    """截止紧迫度：越接近截止分数越高，无截止时间给中性偏低分。
+
+    分档：
+    - 已逾期 1.00 / 24h 内 0.95 / 72h 内 0.70 / 7 天内 0.50；
+    - 7~30 天在 0.50~0.20 之间线性衰减——远期任务之间也分出先后，
+      避免截止 8 天和截止 60 天同分，让时间维度失效（只剩 P 档在起作用）；
+    - 30 天以上 0.20。
+    """
     if due_at is None:
         return 0.30
     delta_hours = (due_at - now).total_seconds() / 3600
@@ -50,7 +57,11 @@ def urgency(due_at: datetime | None, now: datetime) -> float:
         return 0.70          # 3 天内
     if delta_hours <= 168:
         return 0.50          # 7 天内
-    return 0.30              # 更远
+    if delta_hours <= 720:
+        # 7~30 天：0.50 线性衰减到 0.20（截止越早分越高）
+        ratio = (delta_hours - 168) / (720 - 168)
+        return 0.50 - ratio * 0.30
+    return 0.20              # 30 天以上
 
 
 def importance(priority: str) -> float:
@@ -110,11 +121,20 @@ def calculate_score(
     now: datetime,
     blocked_count: int = 0,
 ) -> float:
-    """计算单个任务的优先级分数（0~1，可能因延期惩罚略低于 0）。"""
+    """计算单个任务的优先级分数（0~1，可能因延期惩罚略低于 0）。
+
+    阻塞加成打折：紧迫度进入 7 天以上衰减段（<0.50）时，blocking 减半——
+    「先做完它解锁下游」的催促意义随自身紧迫度下降而减弱，
+    避免远期被依赖任务仅凭加成反超更早截止的独立任务。
+    """
+    u = urgency(task.due_at, now)
+    b = blocking(blocked_count)
+    if u < 0.50:
+        b *= 0.5
     score = (
-        W_URGENCY * urgency(task.due_at, now)
+        W_URGENCY * u
         + W_IMPORTANCE * importance(task.priority)
-        + W_BLOCKING * blocking(blocked_count)
+        + W_BLOCKING * b
         + W_ENERGY * energy_match(task.energy, now)
         - task.delay_count * DELAY_PENALTY_PER_TIME
     )

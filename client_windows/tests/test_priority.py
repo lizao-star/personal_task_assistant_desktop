@@ -36,8 +36,18 @@ class UrgencyTest(unittest.TestCase):
     def test_within_7_days(self):
         self.assertEqual(urgency(self.now + timedelta(days=6), self.now), 0.50)
 
-    def test_far_future(self):
-        self.assertEqual(urgency(self.now + timedelta(days=30), self.now), 0.30)
+    def test_far_future_decays(self):
+        """7~30 天线性衰减：截止越早分越高；30 天以上收敛到 0.20。"""
+        near = urgency(self.now + timedelta(days=10), self.now)
+        far = urgency(self.now + timedelta(days=25), self.now)
+        beyond = urgency(self.now + timedelta(days=30), self.now)
+        self.assertEqual(beyond, 0.20)
+        self.assertGreater(near, far)
+        self.assertGreater(far, beyond)
+        # 衰减段中点抽查：15 天 ≈ 0.396（0.50 - (360-168)/552*0.30）
+        self.assertAlmostEqual(
+            urgency(self.now + timedelta(days=15), self.now), 0.3957, places=3
+        )
 
     def test_none_due(self):
         self.assertEqual(urgency(None, self.now), 0.30)
@@ -185,6 +195,23 @@ class DependencyRankTest(unittest.TestCase):
         ids = [t.record_id for t, _ in ranked]
         self.assertEqual(ids.index("urgent"), 0, f"排序结果 {ids}")
         self.assertLess(ids.index("s1"), ids.index("s2"))
+
+    def test_blocking_discount_for_distant_tasks(self):
+        """远期（紧迫度 <0.50）被依赖任务的阻塞加成减半。
+
+        同任务对比：due 12 天（紧迫度约 0.435）时 blocking 贡献应为
+        完整加成的一半（0.10×1/3×0.5≈0.017）；due 6 天（紧迫度 0.50）时
+        加成完整生效（0.10×1/3≈0.033）。
+        """
+        distant = self._task("dep", 12, priority="P1", title="远期被依赖")
+        s_block = calculate_score(distant, self.now, blocked_count=1)
+        s_none = calculate_score(distant, self.now, blocked_count=0)
+        self.assertAlmostEqual(s_block - s_none, 0.0167, places=3)
+
+        near = self._task("udep", 6, priority="P1", title="近期被依赖")
+        s_block2 = calculate_score(near, self.now, blocked_count=1)
+        s_none2 = calculate_score(near, self.now, blocked_count=0)
+        self.assertAlmostEqual(s_block2 - s_none2, 0.0333, places=3)
 
 
 if __name__ == "__main__":
