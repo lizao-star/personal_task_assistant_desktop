@@ -64,7 +64,8 @@ from ..constants import (
 from .ai_worker import AIInvoker
 
 # 目标级拆解任务表格的列（全部可编辑，空值回落默认）
-GOAL_TASK_COLUMNS = ["任务名", "截止时间(YYYY-MM-DD HH:MM)", "优先级", "预计分钟", "子任务(逗号分隔)"]
+# 「依赖」填前置任务在表格中的序号（从 0 开始，逗号分隔），空表示无前置
+GOAL_TASK_COLUMNS = ["任务名", "截止时间(YYYY-MM-DD HH:MM)", "优先级", "预计分钟", "子任务(逗号分隔)", "依赖(序号,逗号分隔)"]
 
 
 class NewTaskDialog(QDialog):
@@ -433,6 +434,7 @@ class NewTaskDialog(QDialog):
             task.priority if task else "P2",
             str(task.estimate_min) if task and task.estimate_min else "",
             "，".join(task.subtasks) if task else "",
+            "，".join(str(i) for i in task.depends_on) if task else "",
         ]
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
@@ -479,6 +481,16 @@ class NewTaskDialog(QDialog):
                 for s in cell(4).replace("，", ",").split(",")
                 if s.strip()
             ]
+            # 依赖：先原样收集数字，收集完按有效任务数组统一清洗（序号基于数组而非行号）
+            depends_on: list[int] = []
+            for piece in cell(5).replace("，", ",").split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                try:
+                    depends_on.append(int(piece))
+                except ValueError:
+                    continue
             tasks.append(
                 {
                     "title": title,
@@ -486,8 +498,17 @@ class NewTaskDialog(QDialog):
                     "priority": priority,
                     "estimate_min": max(0, min(estimate, 24 * 60)),
                     "subtasks": subtasks[:6],
+                    "depends_on": depends_on,
                 }
             )
+        # 统一清洗：去重、去自身、丢弃越界序号（以 tasks 数组索引为准）
+        total = len(tasks)
+        for i, task in enumerate(tasks):
+            cleaned: list[int] = []
+            for idx in task["depends_on"]:
+                if 0 <= idx < total and idx != i and idx not in cleaned:
+                    cleaned.append(idx)
+            task["depends_on"] = cleaned
         return tasks
 
     # ------------------------------------------------------------------

@@ -116,6 +116,8 @@ class GoalTaskDraft:
     priority: str = "P2"
     estimate_min: int = 0
     subtasks: list[str] = field(default_factory=list)
+    # 前置任务在本数组中的序号（从 0 开始），空数组表示无前置约束
+    depends_on: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -256,6 +258,15 @@ def _normalize_goal_tasks(value) -> list[GoalTaskDraft]:
             estimate = int(float(item.get("estimate_min") or 0))
         except (TypeError, ValueError):
             estimate = 0
+        # depends_on：前置任务序号数组，非法元素忽略
+        depends_on: list[int] = []
+        raw_depends = item.get("depends_on")
+        if isinstance(raw_depends, list):
+            for idx in raw_depends:
+                try:
+                    depends_on.append(int(idx))
+                except (TypeError, ValueError):
+                    continue
         tasks.append(
             GoalTaskDraft(
                 title=title,
@@ -264,10 +275,19 @@ def _normalize_goal_tasks(value) -> list[GoalTaskDraft]:
                 estimate_min=max(0, min(estimate, 24 * 60)),
                 # 目标下的任务也可以再带子任务，同样宁缺勿碎
                 subtasks=_clean_str_list(item.get("subtasks"))[:6],
+                depends_on=depends_on,
             )
         )
         if len(tasks) >= 5:
             break
+    # 统一清洗依赖：去重、去自身、丢弃越界序号
+    total = len(tasks)
+    for i, task in enumerate(tasks):
+        cleaned: list[int] = []
+        for idx in task.depends_on:
+            if 0 <= idx < total and idx != i and idx not in cleaned:
+                cleaned.append(idx)
+        task.depends_on = cleaned
     return tasks
 
 

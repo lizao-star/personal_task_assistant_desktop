@@ -225,6 +225,8 @@ class SyncService:
         if not goal.record_id:
             return False
 
+        # 第一遍：按数组顺序创建全部任务，记录序号 -> record_id（依赖回填用）
+        created_ids: list[str] = []   # 与 tasks 数组对齐；跳过/复用项记现有 id
         for item in payload.get("tasks") or []:
             task_external_id = item.get("external_id", "")
             fields = dict(item.get("fields") or {})
@@ -238,12 +240,39 @@ class SyncService:
             if existing is not None:
                 if existing.record_id and subtasks:
                     self._create_subtasks_safe(existing.record_id, subtasks)
+                created_ids.append(existing.record_id)
                 continue
             created = create_task(
                 self._client, self._app_token, self._table_id, fields
             )
             if created.record_id and subtasks:
                 self._create_subtasks_safe(created.record_id, subtasks)
+            created_ids.append(created.record_id)
+
+        # 第二遍：把 depends_on 序号翻译成 record_id，回填「依赖任务」关联列；
+        # 失败只记日志，不影响目标与任务本身已落表的结果。
+        task_items = payload.get("tasks") or []
+        for i, item in enumerate(task_items):
+            depends_on = item.get("depends_on") or []
+            if not depends_on or i >= len(created_ids):
+                continue
+            dep_ids = [
+                created_ids[j]
+                for j in depends_on
+                if 0 <= j < len(created_ids) and created_ids[j] and j != i
+            ]
+            if not dep_ids or not created_ids[i]:
+                continue
+            try:
+                update_task(
+                    self._client,
+                    self._app_token,
+                    self._table_id,
+                    created_ids[i],
+                    {TaskFields.DEPENDS_ON: dep_ids},
+                )
+            except Exception as e:  # noqa: BLE001 回填失败不阻塞队列
+                logger.warning("回填任务依赖失败（任务 %d）: %s", i, e)
         return True
 
     def _create_subtasks_safe(self, parent_record_id: str, titles: list[str]) -> None:

@@ -382,6 +382,8 @@ class AssistantApp(QObject):
             for item in payload.pop("tasks", []):
                 item = dict(item)
                 subtasks = item.pop("subtasks", []) or []
+                # 依赖不进 build_create_fields（序号引用，推送时统一回填关联）
+                depends_on = item.pop("depends_on", []) or []
                 # 目标级拆解草稿只填核心字段，其余按任务默认值补齐
                 item.setdefault("task_type", "其他")
                 task_external_id = generate_external_id()
@@ -392,6 +394,7 @@ class AssistantApp(QObject):
                             external_id=task_external_id, **item
                         ),
                         "subtasks": subtasks,
+                        "depends_on": depends_on,
                     }
                 )
             self._cache.enqueue_op(

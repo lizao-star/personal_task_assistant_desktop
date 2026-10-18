@@ -33,7 +33,7 @@ _PARSE_CONTRACT = """输出 JSON 字段定义：
   "tags": ["标签1", "标签2"]，可空数组,
   "subtask_needed": true或false，先判断该任务是否有必要拆解子任务：一次动作即可完成（如取快递、回邮件、交表）则为false，多步骤任务为true（level=goal 时忽略本字段）,
   "subtasks": ["步骤1", "步骤2"]，执行步骤，按需拆解，宁缺勿碎：subtask_needed为false时必须为空数组；为true时给 2-6 个按顺序推进的步骤（level=goal 时留空数组）,
-  "tasks": [{"title": "任务名", "due_at": "截止时间或null", "priority": "P0|P1|P2|P3", "estimate_min": 90, "subtask_needed": false, "subtasks": []}],
+  "tasks": [{"title": "任务名", "due_at": "截止时间或null", "priority": "P0|P1|P2|P3", "estimate_min": 90, "subtask_needed": false, "subtasks": [], "depends_on": []}],
   "key_results": ["关键结果1", "关键结果2"],
   "description": "补充描述；没有则填空串",
   "advice": "怎么做才能做好的一段策略建议，80 字以内；只说明方法、重点与取舍，不要罗列具体动作",
@@ -45,7 +45,10 @@ _PARSE_CONTRACT = """输出 JSON 字段定义：
 1. 判 goal 必须同时满足两条：① 截止时间距当前时间 ≥ 30 天；② 这件事需要持续投入、能拆成多个阶段推进（备考、写论文、学一门课、做一个项目）。
    缺任意一条就判 task：时间虽远但一次就能办完的事（参加一场会议、体检、报到、领材料、听讲座）一律判 task，
    即使它需要提前做一些准备，也只是 task 的 subtasks，不要升格成 goal。
-2. level=goal 时：tasks 必填，给 2~5 个能真正推进该目标的 L2 任务（按执行顺序，每项是一整天到数周可完成的任务）；
+2. level=goal 时：tasks 必填，给 2~5 个能真正推进该目标的 L2 任务（按执行顺序排列，每项是一整天到数周可完成的任务）；
+   tasks 各项的 depends_on 写「必须先完成的前置任务在数组中的序号」（从 0 开始，可多个）：
+   只有当前置任务完成后本任务才能开始时才填（例如先报名才能打印准考证、先摸底才能针对性复习）；
+   无前置约束的任务留空数组。数组顺序必须与实际推进顺序一致，禁止把后做的任务排在前面；
    key_results 给 2~4 条可验收的关键结果；advice 必须给出达成该目标的策略（例如先摸底、按薄弱项分配精力、阶段验收），
    不能只是「认真准备」这类空话；
    输入中出现的中间时间节点（报名截止、打印准考证、模拟考等）用一条带 due_at 的 tasks 记录承接，不要另设概念；

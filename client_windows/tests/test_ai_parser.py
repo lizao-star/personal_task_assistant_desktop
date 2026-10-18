@@ -235,6 +235,40 @@ class TestNormalizeLevel(unittest.TestCase):
         draft = normalize_task(data, 0.6, NOW)
         self.assertEqual(len(draft.tasks[0].subtasks), 6)
 
+    def test_goal_task_depends_on(self):
+        """目标级任务解析 depends_on：合法序号保留，越界/自身/重复被清洗。"""
+        data = {
+            "title": "备考六级",
+            "level": "goal",
+            "due_at": "2026-12-20",
+            "tasks": [
+                {"title": "报名缴费", "depends_on": []},
+                {"title": "打印准考证", "depends_on": [0, 0, 1, "x", 9, -1]},
+                {"title": "参加考试", "depends_on": [1]},
+            ],
+            "confidence": 0.9,
+        }
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.tasks[0].depends_on, [])
+        # 重复的 0 去重、自身序号 1 去掉、非数字/越界/负数全部丢弃
+        self.assertEqual(draft.tasks[1].depends_on, [0])
+        self.assertEqual(draft.tasks[2].depends_on, [1])
+
+    def test_goal_task_depends_on_non_list(self):
+        """depends_on 不是数组时按空处理，不影响解析。"""
+        data = {
+            "title": "准备毕设",
+            "level": "goal",
+            "due_at": "2027-03-20",
+            "tasks": [
+                {"title": "开题", "depends_on": "0"},
+                {"title": "写初稿"},
+            ],
+        }
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.tasks[0].depends_on, [])
+        self.assertEqual(draft.tasks[1].depends_on, [])
+
     def test_goal_without_due_downgraded(self):
         """没有截止时间就无法证明是长期投入，按 task 处理并提示。"""
         data = {
