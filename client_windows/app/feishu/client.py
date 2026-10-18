@@ -170,7 +170,12 @@ class FeishuClient:
         page_token: str | None = None
 
         while True:
-            params: dict[str, Any] = {"page_size": page_size}
+            params: dict[str, Any] = {
+                "page_size": page_size,
+                # 开启后返回记录级 created_time / last_modified_time，
+                # 供系统「创建时间 / 修改时间」字段缺失时兜底
+                "automatic_fields": "true",
+            }
             if page_token:
                 params["page_token"] = page_token
 
@@ -208,11 +213,19 @@ class FeishuClient:
             body: dict[str, Any] = {
                 "filter": {"conjunction": "and", "conditions": conditions},
                 "page_size": page_size,
+                # 同上：返回记录级 last_modified_time，供修改时间兜底
+                "automatic_fields": True,
             }
             if page_token:
                 body["page_token"] = page_token
 
-            data = self.request("POST", path, json_body=body)
+            # automatic_fields 是 query 参数：开启后返回记录级 last_modified_time
+            data = self.request(
+                "POST",
+                path,
+                params={"automatic_fields": "true"},
+                json_body=body,
+            )
             payload = data.get("data", {})
             for item in payload.get("items", []) or []:
                 yield item
@@ -230,7 +243,7 @@ class FeishuClient:
             f"/open-apis/bitable/v1/apps/{app_token}"
             f"/tables/{table_id}/records/{record_id}"
         )
-        data = self.request("GET", path)
+        data = self.request("GET", path, params={"automatic_fields": "true"})
         return data.get("data", {}).get("record", {})
 
     def create_record(

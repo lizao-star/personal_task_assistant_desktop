@@ -12,7 +12,13 @@ from datetime import datetime
 from pathlib import Path
 
 from app.constants import SubtaskFields, TaskFields
-from app.feishu.repository import SubTask, group_subtasks, to_subtask, to_task
+from app.feishu.repository import (
+    SubTask,
+    group_subtasks,
+    parse_datetime,
+    to_subtask,
+    to_task,
+)
 from app.services.cache import LocalCache
 
 
@@ -24,6 +30,36 @@ def _mk_task_record(fields: dict) -> dict:
 def _mk_sub_record(record_id: str, fields: dict) -> dict:
     """构造飞书子任务表原始记录形态。"""
     return {"record_id": record_id, "fields": fields}
+
+
+class TestModifiedAtFallback(unittest.TestCase):
+    """修改时间为系统字段时的解析与兜底。"""
+
+    def test_field_value_preferred(self):
+        """fields 中有修改时间时直接使用，忽略记录级值。"""
+        ts = 1760900000000
+        record = {
+            "record_id": "r1",
+            "fields": {TaskFields.TITLE: "t", TaskFields.UPDATED_AT: ts},
+            "last_modified_time": ts + 999999,
+        }
+        task = to_task(record)
+        self.assertEqual(task.modified_ms, ts)
+
+    def test_fallback_to_record_level(self):
+        """fields 中没这列（如系统字段未返回）时回退 last_modified_time。"""
+        ts = 1760900000000
+        record = {
+            "record_id": "r2",
+            "fields": {TaskFields.TITLE: "t"},
+            "last_modified_time": ts,
+        }
+        self.assertEqual(to_task(record).modified_ms, ts)
+
+    def test_array_wrapped_timestamp(self):
+        """部分接口用数组包裹时间戳，也能正确解析。"""
+        self.assertIsNotNone(parse_datetime([1760900000000]))
+        self.assertIsNone(parse_datetime([]))
 
 
 class TestTaskAIFields(unittest.TestCase):

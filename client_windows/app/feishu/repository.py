@@ -67,14 +67,36 @@ def parse_number(value: Any) -> int:
 
 
 def parse_datetime(value: Any) -> datetime | None:
-    """解析日期字段（毫秒时间戳）为本地 datetime。"""
+    """解析日期字段（毫秒时间戳）为本地 datetime。
+
+    兼容两种返回形态：
+    - 普通日期 / 系统「创建时间·修改时间」字段：数值毫秒时间戳；
+    - 列表形式：[1696492800000]（部分接口会包一层数组）。
+    """
     if value is None or value == "":
         return None
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+        if value is None:
+            return None
     try:
         # 飞书日期为毫秒时间戳
         return datetime.fromtimestamp(int(value) / 1000)
     except (TypeError, ValueError, OSError):
         return None
+
+
+def record_modified_at(record: dict[str, Any], field_name: str) -> datetime | None:
+    """读取记录的「修改时间」，带记录级兜底。
+
+    优先取 fields 中的字段值；该列为系统字段或未返回时，回退到记录级的
+    last_modified_time（需请求时开 automatic_fields=true）。
+    """
+    value = record.get("fields", {}).get(field_name)
+    parsed = parse_datetime(value)
+    if parsed is not None:
+        return parsed
+    return parse_datetime(record.get("last_modified_time"))
 
 
 def parse_select(value: Any) -> str:
@@ -190,7 +212,7 @@ def to_task(record: dict[str, Any]) -> Task:
         description=parse_text(fields.get(TaskFields.DESCRIPTION)),
         external_id=parse_text(fields.get(TaskFields.EXTERNAL_ID)),
         completed_at=parse_datetime(fields.get(TaskFields.COMPLETED_AT)),
-        modified_at=parse_datetime(fields.get(TaskFields.UPDATED_AT)),
+        modified_at=record_modified_at(record, TaskFields.UPDATED_AT),
         ai_breakdown=parse_text(fields.get(TaskFields.AI_BREAKDOWN)),
         checklist=parse_text(fields.get(TaskFields.CHECKLIST)),
         ai_advice=parse_text(fields.get(TaskFields.AI_ADVICE)),
@@ -291,7 +313,7 @@ def to_goal(record: dict[str, Any]) -> Goal:
         key_results=parse_text(fields.get(GoalFields.KEY_RESULTS)),
         progress=parse_number(fields.get(GoalFields.PROGRESS)),
         external_id=parse_text(fields.get(GoalFields.EXTERNAL_ID)),
-        modified_at=parse_datetime(fields.get(GoalFields.UPDATED_AT)),
+        modified_at=record_modified_at(record, GoalFields.UPDATED_AT),
     )
 
 
@@ -624,7 +646,7 @@ def get_remote_modified_ms(
 ) -> int:
     """读取云端单条记录的修改时间（毫秒），用于冲突检测。"""
     record = client.get_record(app_token, table_id, record_id)
-    updated = parse_datetime(record.get("fields", {}).get(TaskFields.UPDATED_AT))
+    updated = record_modified_at(record, TaskFields.UPDATED_AT)
     return int(updated.timestamp() * 1000) if updated else 0
 
 

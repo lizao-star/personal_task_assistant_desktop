@@ -127,6 +127,8 @@ Authorization: Bearer {tenant_access_token}
 | completed_at   | 完成时间                                         |
 | modified_at    | 修改时间（M2）                                   |
 
+| 日期解析 | 兼容毫秒时间戳、列表包裹（`[ts]`）；`修改时间` 缺失时回退记录级 `last_modified_time` |
+
 字段名常量：[constants.py](../client_windows/app/constants.py)
 
 ### 2.4 搜索记录（M2 新增）
@@ -153,6 +155,12 @@ Authorization: Bearer {tenant_access_token}
 客户端封装为 `FeishuClient.search_records()`，用于：
 - **幂等查重**：按 `外部ID` 搜索；
 - **增量拉取**：按 `修改时间 > cursor` 搜索。
+
+> `修改时间` 必须是**系统字段**（type=1002，自动更新），不能是普通日期列；
+> 普通日期列作为筛选字段会报 `1254018 InvalidFilter`。
+> 所有读接口均传 `automatic_fields=true`，同时拿到记录级的 `created_time` /
+> `last_modified_time`；若 `fields` 中取不到 `修改时间`，客户端回退用
+> `last_modified_time`（见 `repository.record_modified_at`）。
 
 ### 2.5 新建记录（M2 新增）
 
@@ -739,7 +747,9 @@ M4.5 起**编辑对话框与详情对话框合并**：双击任务行直接打�
 | `external_id` | 外部ID                   | 文本（幂等键）                           |
 | （固定）      | 同步来源                 | 单选「客户端」                           |
 
-> 目标表需手工新增 `外部ID`（文本）、`同步来源`（单选）、`修改时间`（日期）三列，否则幂等与增量同步失效。
+> 目标表需手工新增 `外部ID`（文本）、`同步来源`（单选）两列，否则目标写入无法幂等重试；
+> `修改时间` 必须建成**系统字段**（自动更新，type=1002），不要用普通日期列，
+> 否则增量 search 会报 `1254018 InvalidFilter`。
 > 目标级没有独立的「AI建议」列：对话框里编辑的策略建议会以「AI 建议：…」段落并入 `description` 一并写入。
 
 ## 14B. 界面尺寸与滚动（小屏适配）
