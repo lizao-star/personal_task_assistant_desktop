@@ -247,9 +247,9 @@ Authorization: Bearer {tenant_access_token}
 纯规则计算（不调用 AI），公式：
 
 ```
-priority_score = 0.40 * urgency
+priority_score = 0.50 * urgency
                + 0.30 * importance
-               + 0.20 * blocking
+               + 0.10 * blocking
                + 0.10 * energy_match
                - 延期次数 * 0.02
 ```
@@ -258,6 +258,10 @@ priority_score = 0.40 * urgency
 - importance：P0=1.0，P1=0.8，P2=0.6，P3=0.4
 - blocking：任务被其他任务依赖的数量，3 个及以上为 1.0
 - energy_match：精力需求（高/中/低）与当前时段匹配度（1.0 / 0.6 / 0.2）
+
+> 紧迫度为主导因子（0.50）。目标链前置的「先做前置」顺序由 rank_tasks 的
+> 依赖修正硬保证，blocking 只保留 0.10 的关键路径倾向——时间更紧的独立
+> 任务不会被远期被依赖前置仅凭加成超越。
 
 实现：[priority.py](../client_windows/app/services/priority.py)，测试：[test_priority.py](../client_windows/tests/test_priority.py)
 
@@ -449,11 +453,12 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
   "key_results": ["真题正确率 ≥ 75%", "听力稳定 180+"],
   "advice": "重点是听力和阅读，占分七成；每天固定 1 小时真题精练，写作背 3 套模板即可。",
   "tasks": [
-    { "title": "打印笔试准考证", "due_at": "2026-12-01T09:00:00+08:00", "subtasks": [] },
+    { "title": "报名并缴费", "due_at": "2026-11-20T23:59:00+08:00", "subtasks": [], "depends_on": [] },
+    { "title": "打印笔试准考证", "due_at": "2026-12-01T09:00:00+08:00", "subtasks": [], "depends_on": [0] },
     { "title": "完成近 5 年真题精练", "due_at": "2026-12-10T23:59:00+08:00",
       "priority": "P1", "estimate_min": 600,
-      "subtasks": ["听力真题 10 套", "阅读真题 10 套"] },
-    { "title": "写作与翻译模板训练", "due_at": "2026-12-08T23:59:00+08:00", "subtasks": [] }
+      "subtasks": ["听力真题 10 套", "阅读真题 10 套"], "depends_on": [] },
+    { "title": "写作与翻译模板训练", "due_at": "2026-12-08T23:59:00+08:00", "subtasks": [], "depends_on": [] }
   ],
   "confidence": 0.78
 }
@@ -461,20 +466,23 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 **校验规则（`parser.normalize_task`）**：
 
-| 场景                                         | 处理                                                                                 |
-| -------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `level=goal` 且 `tasks` ≥ 2                  | 保留 goal，`tasks` 最多 5 个，单任务 `subtasks` 最多 6 条                            |
-| `level=goal` 但 `tasks` < 2                  | **降级为 task**，清空 `tasks`，`confidence` 压到 ≤ 0.4 → 写入收集箱待人工确认        |
-| `level=goal` 但无 `due_at`                   | 降级 task，`level_confidence` 记 0.4，原因写入 `level_note`                          |
-| `level=goal` 但距截止 < 30 天                | 降级 task，`level_confidence` 记 0.4                                                 |
-| `level=goal` 但命中一次性事件词              | 降级 task，`level_confidence` 记 0.4（远期会议也不会变目标）                         |
-| `level=task`，≥30 天 + 非一次性 + 有投入信号 | **追加一次按目标拆解的追问**（`GOAL_RETRY_SUFFIX`）；返回 goal 才采纳，否则保留 task |
-| `level` 缺失或非法                           | 一律按 `task` 处理，不硬猜层级                                                       |
-| `level=subtask`                              | 不再向下拆解，`tasks` 与 `subtasks` 均清空                                           |
-| `subtask_needed=false`                       | 清空 `subtasks`（宁缺勿碎，防模型凑数硬拆）                                          |
-| `subtasks` 与 `checklist` 重复               | 以 `subtasks` 为准，从 `checklist` 中去重                                            |
+| 场景                                         | 处理                                                                                                        |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `level=goal` 且 `tasks` ≥ 2                  | 保留 goal，`tasks` 最多 5 个，单任务 `subtasks` 最多 6 条                                                   |
+| `level=goal` 但 `tasks` < 2                  | **降级为 task**，清空 `tasks`，`confidence` 压到 ≤ 0.4 → 写入收集箱待人工确认                               |
+| `level=goal` 但无 `due_at`                   | 降级 task，`level_confidence` 记 0.4，原因写入 `level_note`                                                 |
+| `level=goal` 但距截止 < 30 天                | 降级 task，`level_confidence` 记 0.4                                                                        |
+| `level=goal` 但命中一次性事件词              | 降级 task，`level_confidence` 记 0.4（远期会议也不会变目标）                                                |
+| `level=task`，≥30 天 + 非一次性 + 有投入信号 | **追加一次按目标拆解的追问**（`GOAL_RETRY_SUFFIX`）；返回 goal 才采纳，否则保留 task                        |
+| `level` 缺失或非法                           | 一律按 `task` 处理，不硬猜层级                                                                              |
+| `level=subtask`                              | 不再向下拆解，`tasks` 与 `subtasks` 均清空                                                                  |
+| `subtask_needed=false`                       | 清空 `subtasks`（宁缺勿碎，防模型凑数硬拆）                                                                 |
+| `tasks[].depends_on`                         | 前置任务序号数组（从 0 开始）：去重、去自身、越界/非数字丢弃；落表时翻译为 record_id 回填「依赖任务」关联列 |
+| `subtasks` 与 `checklist` 重复               | 以 `subtasks` 为准，从 `checklist` 中去重                                                                   |
 
-落表顺序：先建目标拿 record_id → 建任务带「所属目标」关联 → 建子任务带「所属任务」关联；中途失败保留已写入部分，失败部分走离线队列重试（`goal_create` op，按「外部ID」幂等）。
+落表顺序：先建目标拿 record_id → 建任务带「所属目标」关联 → 建子任务带「所属任务」关联 → 按 `depends_on` 回填「依赖任务」关联；中途失败保留已写入部分，失败部分走离线队列重试（`goal_create` op，按「外部ID」幂等）。
+
+待办区排序（`priority.rank_tasks`）在分数降序基础上做依赖修正：被依赖（前置）的任务排在依赖者之前，保证「先报名 → 再打印准考证」这类链条不倒挂；无依赖时排序结果与纯分数序完全一致，循环依赖按原分数序放行。
 
 拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`；新建解析额外输出 `level / level_confidence / advice`。
 

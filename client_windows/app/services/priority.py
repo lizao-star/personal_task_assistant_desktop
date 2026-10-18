@@ -1,15 +1,19 @@
 """优先级计算引擎（纯函数，无任何外部 IO，可单元测试）。
 
 公式（各因子 0~1 归一化后加权）：
-    priority_score = 0.40 * urgency
+    priority_score = 0.50 * urgency
                    + 0.30 * importance
-                   + 0.20 * blocking
+                   + 0.10 * blocking
                    + 0.10 * energy_match
                    - penalty
 
 设计原则：
 - 完全不依赖 AI 与飞书公式字段，输入输出可复现；
-- AI 只负责“建议”，排序以这里的计算结果为准。
+- AI 只负责“建议”，排序以这里的计算结果为准；
+- 紧迫度是主导因子（0.50）：时间更紧的独立任务不应被远期目标链上的
+  前置任务仅凭「被依赖加成」超越；依赖链的先后顺序由 rank_tasks 的
+  依赖修正硬保证（前置排在依赖者之前），blocking 因子只保留轻微的
+  关键路径倾向（0.10），避免远期前置挤占紧迫任务的位置。
 """
 
 from __future__ import annotations
@@ -19,10 +23,11 @@ from datetime import datetime
 from ..constants import PRIORITY_TO_IMPORTANCE
 from ..feishu.repository import Task
 
-# 各因子权重
-W_URGENCY = 0.40
+# 各因子权重：紧迫度为主导；依赖链顺序由 rank_tasks 硬保证，
+# blocking 只保留轻微关键路径倾向，防止远期前置挤占紧迫独立任务
+W_URGENCY = 0.50
 W_IMPORTANCE = 0.30
-W_BLOCKING = 0.20
+W_BLOCKING = 0.10
 W_ENERGY = 0.10
 # 每延期一次扣减的分数
 DELAY_PENALTY_PER_TIME = 0.02
@@ -117,12 +122,47 @@ def calculate_score(
     return round(max(score, 0.0), 4)
 
 
+def _respect_dependencies(
+    scored: list[tuple[Task, float]],
+) -> list[tuple[Task, float]]:
+    """对已按分数降序的列表做依赖顺序修正（稳定，不改变无依赖时的结果）。
+
+    规则：若任务 A 依赖 B（B 还在列表中未就绪），A 即使分数更高也要排到 B 之后。
+    实现：每轮从剩余任务里取「分数最高且前置均已就绪」的一项输出；
+    所有任务互不依赖时，输出与原排序完全一致。
+    循环依赖视为全部就绪，直接按原分数序输出，不会丢任务。
+    """
+    by_id = {task.record_id: (task, score) for task, score in scored}
+    ordered: list[tuple[Task, float]] = []
+    emitted: set[str] = set()
+    remaining = list(scored)
+    while remaining:
+        for idx, (task, _score) in enumerate(remaining):
+            deps = [
+                dep
+                for dep in task.depends_on
+                if dep in by_id and dep not in emitted and dep != task.record_id
+            ]
+            if not deps:
+                ordered.append(remaining.pop(idx))
+                emitted.add(task.record_id)
+                break
+        else:
+            # 剩余任务互相依赖（环）：按原分数序直接放行，避免死循环
+            ordered.append(remaining.pop(0))
+    return ordered
+
+
 def rank_tasks(tasks: list[Task], now: datetime | None = None) -> list[tuple[Task, float]]:
-    """对任务列表打分并按分数降序排列，返回 (任务, 分数) 列表。"""
+    """对任务列表打分并排序，返回 (任务, 分数) 列表。
+
+    主序为分数降序；在此基础上做依赖修正：被依赖的任务排在依赖者之前，
+    保证目标拆解出的「先报名 → 再打印准考证」这类链条在列表中不倒挂。
+    """
     now = now or datetime.now()
     blocked_counts = build_blocked_count(tasks)
     scored = [
         (task, calculate_score(task, now, blocked_counts.get(task.record_id, 0)))
         for task in tasks
     ]
-    return sorted(scored, key=lambda item: item[1], reverse=True)
+    return _respect_dependencies(sorted(scored, key=lambda item: item[1], reverse=True))
