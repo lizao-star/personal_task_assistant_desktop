@@ -157,6 +157,7 @@ class TestNormalizeLevel(unittest.TestCase):
         data = {
             "title": "完成毕业论文初稿",
             "level": "goal",
+            "due_at": "2026-12-20",
             "description": "12 月底前完成",
             "key_results": ["完成文献综述", "完成实验", "", "写完初稿"],
             "tasks": [
@@ -166,7 +167,7 @@ class TestNormalizeLevel(unittest.TestCase):
             ],
             "confidence": 0.9,
         }
-        draft = normalize_task(data, 0.6)
+        draft = normalize_task(data, 0.6, NOW)
         self.assertTrue(draft.is_goal)
         self.assertEqual(len(draft.tasks), 2)
         self.assertEqual(draft.tasks[0].title, "写文献综述")
@@ -175,19 +176,22 @@ class TestNormalizeLevel(unittest.TestCase):
         # 关键结果最多 4 条且去掉空项
         self.assertEqual(draft.key_results, ["完成文献综述", "完成实验", "写完初稿"])
         self.assertEqual(draft.description, "12 月底前完成")
+        self.assertEqual(draft.level_note, "")
 
     def test_goal_without_enough_tasks_downgraded(self):
         """目标必须拆解：不足 2 个任务 → 降级为 task 且低置信度待确认。"""
         data = {
             "title": "学完机器学习",
             "level": "goal",
+            "due_at": "2027-01-31",
             "tasks": [{"title": "只看一个视频"}],
             "confidence": 0.95,
         }
-        draft = normalize_task(data, 0.6)
+        draft = normalize_task(data, 0.6, NOW)
         self.assertEqual(draft.level, "task")
         self.assertEqual(draft.tasks, [])
         self.assertLessEqual(draft.confidence, 0.4)
+        self.assertLessEqual(draft.level_confidence, 0.4)
         self.assertTrue(draft.needs_review)
         self.assertEqual(draft.status_hint, STATUS_INBOX)
 
@@ -222,13 +226,142 @@ class TestNormalizeLevel(unittest.TestCase):
         data = {
             "title": "目标",
             "level": "goal",
+            "due_at": "2026-12-20",
             "tasks": [
                 {"title": "任务A", "subtasks": [f"步骤{i}" for i in range(10)]},
                 {"title": "任务B"},
             ],
         }
-        draft = normalize_task(data, 0.6)
+        draft = normalize_task(data, 0.6, NOW)
         self.assertEqual(len(draft.tasks[0].subtasks), 6)
+
+    def test_goal_without_due_downgraded(self):
+        """没有截止时间就无法证明是长期投入，按 task 处理并提示。"""
+        data = {
+            "title": "学完机器学习",
+            "level": "goal",
+            "tasks": [{"title": "a"}, {"title": "b"}],
+        }
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.level, "task")
+        self.assertEqual(draft.tasks, [])
+        self.assertIn("截止时间", draft.level_note)
+        self.assertTrue(draft.level_uncertain)
+
+    def test_near_due_goal_downgraded(self):
+        """距截止不足 30 天的不算目标。"""
+        data = {
+            "title": "复习期末考试",
+            "level": "goal",
+            "due_at": "2026-10-20",
+            "tasks": [{"title": "a"}, {"title": "b"}],
+        }
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.level, "task")
+        self.assertIn("30 天", draft.level_note)
+
+    def test_far_one_shot_event_stays_task(self):
+        """时间远但一次性能办完的事（开会/体检/报到）不能算目标。"""
+        data = {
+            "title": "参加学院年度学术会议",
+            "level": "goal",
+            "due_at": "2027-03-01",
+            "tasks": [{"title": "a"}, {"title": "b"}],
+        }
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.level, "task")
+        self.assertIn("一次性事件", draft.level_note)
+
+    def test_far_meeting_without_prep_is_plain_task(self):
+        """模型判 task 的远期会议也不会被升级规则误伤。"""
+        data = {"title": "参加例会", "level": "task", "due_at": "2027-03-01"}
+        draft = normalize_task(data, 0.6, NOW)
+        self.assertEqual(draft.level, "task")
+
+    def test_advice_passed_through(self):
+        data = dict(GOOD_OUTPUT, advice="先按薄弱项分配精力")
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.advice, "先按薄弱项分配精力")
+
+    def test_subtasks_and_checklist_deduped(self):
+        """同一件事不要同时出现在两处：以 subtasks 为准。"""
+        data = dict(
+            GOOD_OUTPUT,
+            subtask_needed=True,
+            subtasks=["复习第三章", "完成习题"],
+            checklist=["复习第三章", "带学生证"],
+        )
+        draft = normalize_task(data, 0.6)
+        self.assertEqual(draft.checklist, ["带学生证"])
+
+
+class TestParseLevelRetry(unittest.TestCase):
+    """层级纠错：模型判低时追加一次按目标拆解的追问。"""
+
+    FIRST_TASK = {
+        "title": "准备六级笔试",
+        "level": "task",
+        "task_type": "考试",
+        "due_at": "2026-12-12T15:00:00+08:00",
+        "confidence": 0.8,
+    }
+    GOAL = {
+        "title": "准备六级笔试",
+        "level": "goal",
+        "task_type": "考试",
+        "due_at": "2026-12-12T15:00:00+08:00",
+        "tasks": [{"title": "背单词"}, {"title": "刷真题"}],
+        "advice": "先做一套真题摸底，再按失分项分配时间",
+        "confidence": 0.8,
+    }
+
+    def test_task_upgraded_after_goal_retry(self):
+        provider = FakeProvider([dict(self.FIRST_TASK), dict(self.GOAL)])
+        draft, usage = parse_task(
+            provider, "六级笔试 12-12 15:00-17:25", now=NOW
+        )
+        self.assertEqual(provider.calls, 2)
+        self.assertTrue(draft.is_goal)
+        self.assertEqual(len(draft.tasks), 2)
+        self.assertIn("摸底", draft.advice)
+        self.assertEqual(usage.total_tokens, 15)
+
+    def test_one_shot_event_not_retried(self):
+        """远期但一次性能办完的会议不追问，避免误升格。"""
+        provider = FakeProvider(
+            [
+                {
+                    "title": "参加学术会议",
+                    "level": "task",
+                    "due_at": "2026-12-12T09:00:00+08:00",
+                    "confidence": 0.8,
+                }
+            ]
+        )
+        draft, _ = parse_task(provider, "12-12 参加学术会议", now=NOW)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(draft.level, "task")
+
+    def test_keeps_task_when_model_insists(self):
+        provider = FakeProvider([dict(self.FIRST_TASK), dict(self.FIRST_TASK)])
+        draft, _ = parse_task(provider, "六级笔试 12-12", now=NOW)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(draft.level, "task")
+
+    def test_near_due_task_not_retried(self):
+        provider = FakeProvider(
+            [
+                {
+                    "title": "复习期末考试",
+                    "level": "task",
+                    "due_at": "2026-10-20T09:00:00+08:00",
+                    "confidence": 0.8,
+                }
+            ]
+        )
+        draft, _ = parse_task(provider, "10-20 复习期末考试", now=NOW)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(draft.level, "task")
 
 
 class TestTitleOnlyDraft(unittest.TestCase):
@@ -323,12 +456,28 @@ class TestBuildFieldsM3(unittest.TestCase):
             tags=["数学"],
             ai_breakdown="1. 复习\n2. 做题",
             checklist="核对答案",
+            ai_advice="先按薄弱项分配精力",
         )
         self.assertEqual(fields[TaskFields.STATUS], STATUS_INBOX)
         self.assertEqual(fields[TaskFields.ENERGY], "中")
         self.assertEqual(fields[TaskFields.TAGS], ["数学"])
         self.assertEqual(fields[TaskFields.AI_BREAKDOWN], "1. 复习\n2. 做题")
         self.assertEqual(fields[TaskFields.CHECKLIST], "核对答案")
+        self.assertEqual(fields[TaskFields.AI_ADVICE], "先按薄弱项分配精力")
+
+    def test_create_fields_without_advice_omits_key(self):
+        """没有建议时不写该列，避免把已有内容清空。"""
+        due = datetime(2026, 10, 8, 18, 0, 0)
+        fields = build_create_fields(
+            title="x", due_at=due, priority="P1", task_type="其他", external_id="e"
+        )
+        self.assertNotIn(TaskFields.AI_ADVICE, fields)
+
+    def test_edit_fields_supports_advice(self):
+        from app.feishu.repository import build_edit_fields
+
+        fields = build_edit_fields({"ai_advice": "先摸底再分配时间"})
+        self.assertEqual(fields[TaskFields.AI_ADVICE], "先摸底再分配时间")
 
     def test_create_fields_default_status_unchanged(self):
         due = datetime(2026, 10, 8, 18, 0, 0)

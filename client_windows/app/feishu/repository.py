@@ -150,6 +150,8 @@ class Task:
     # M3 新增：AI 拆解与检查清单（详情对话框展示）
     ai_breakdown: str = ""
     checklist: str = ""
+    # AI 策略建议：怎么做才能做好（不同于拆解动作清单）
+    ai_advice: str = ""
     # M4.5 新增：所属目标（目标项目表 record_id，最多 1 个）
     goal_record_id: str = ""
 
@@ -191,6 +193,7 @@ def to_task(record: dict[str, Any]) -> Task:
         modified_at=parse_datetime(fields.get(TaskFields.UPDATED_AT)),
         ai_breakdown=parse_text(fields.get(TaskFields.AI_BREAKDOWN)),
         checklist=parse_text(fields.get(TaskFields.CHECKLIST)),
+        ai_advice=parse_text(fields.get(TaskFields.AI_ADVICE)),
         goal_record_id=goals[0] if goals else "",
     )
 
@@ -422,6 +425,7 @@ def build_create_fields(
     tags: list[str] | None = None,
     ai_breakdown: str = "",
     checklist: str = "",
+    ai_advice: str = "",
     goal_record_id: str = "",
 ) -> dict[str, Any]:
     """把新建任务的本地输入组装为飞书 fields 字典。
@@ -454,6 +458,8 @@ def build_create_fields(
         fields[TaskFields.AI_BREAKDOWN] = ai_breakdown
     if checklist:
         fields[TaskFields.CHECKLIST] = checklist
+    if ai_advice:
+        fields[TaskFields.AI_ADVICE] = ai_advice
     if goal_record_id:
         fields[TaskFields.GOAL] = [goal_record_id]
     return fields
@@ -505,7 +511,7 @@ def build_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
     支持的键（与 Task 属性同名）：
         title / status / priority / task_type / due_at / start_at /
         estimate_min / energy / voice / tags / description / reminder_rules /
-        ai_breakdown / checklist
+        ai_breakdown / checklist / ai_advice
     """
     fields: dict[str, Any] = {}
 
@@ -537,6 +543,8 @@ def build_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
         fields[TaskFields.AI_BREAKDOWN] = changes.get("ai_breakdown") or ""
     if "checklist" in changes:
         fields[TaskFields.CHECKLIST] = changes.get("checklist") or ""
+    if "ai_advice" in changes:
+        fields[TaskFields.AI_ADVICE] = changes.get("ai_advice") or ""
     if "goal_record_id" in changes:
         goal_id = (changes.get("goal_record_id") or "").strip()
         fields[TaskFields.GOAL] = [goal_id] if goal_id else []
