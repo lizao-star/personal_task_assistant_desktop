@@ -6,7 +6,7 @@
 - title_only_draft：规则兜底
 - parse_task / breakdown_task：失败重试 1 次 + 兜底不崩
 - build_create_fields 的 M3 扩展参数与 build_subtask_fields
-- 提示词的学术诚信红线
+- 提示词契约（当前时间注入与 JSON 字段定义）
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from app.ai.parser import (
     title_only_draft,
 )
 from app.ai.prompts import (
-    INTEGRITY_RULE,
     SYSTEM_PROMPT,
     build_breakdown_user_prompt,
     build_parse_user_prompt,
@@ -269,21 +268,16 @@ class TestBuildFieldsM3(unittest.TestCase):
 
 
 class TestPrompts(unittest.TestCase):
-    """提示词红线与契约。"""
-
-    def test_integrity_in_system_prompt(self):
-        self.assertIn(INTEGRITY_RULE, SYSTEM_PROMPT)
+    """提示词契约。"""
 
     def test_parse_prompt_has_current_time_and_contract(self):
         prompt = build_parse_user_prompt("明天交作业", NOW)
         self.assertIn("2026-10-07", prompt)
         self.assertIn("confidence", prompt)
-        self.assertIn(INTEGRITY_RULE, prompt)
 
-    def test_breakdown_prompt_has_integrity(self):
+    def test_breakdown_prompt_has_task_title(self):
         prompt = build_breakdown_user_prompt("写论文", "", NOW)
         self.assertIn("写论文", prompt)
-        self.assertIn(INTEGRITY_RULE, prompt)
 
 
 if __name__ == "__main__":

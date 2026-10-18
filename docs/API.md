@@ -381,7 +381,7 @@ UI（新建任务对话框的 AI 解析填充 / 详情页 AI 拆解按钮）
     ▼
 parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
     │
-    ├─ prompts.py   构造系统/用户提示词（含当前时间，硬编码学术诚信红线）
+    ├─ prompts.py   构造系统/用户提示词（含当前时间与 JSON 输出契约）
     └─ provider.py  DeepSeekProvider → POST {base_url}/chat/completions
                     model=deepseek-chat，response_format=json_object，temperature=0.2
 ```
@@ -402,11 +402,16 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
   "estimate_min": 90,
   "energy": "中",
   "tags": ["数学"],
+  "subtask_needed": true,
   "subtasks": ["复习第三章", "完成习题1-5"],
   "checklist": ["核对答案"],
   "confidence": 0.85
 }
 ```
+
+> **按需拆解原则**：提示词要求 AI 先输出 `subtask_needed` 判断再填 `subtasks`；
+> 一次动作可完成的简单任务（取快递/回邮件等）`subtask_needed=false` 且 `subtasks` 为空，
+> 避免「为凑数硬拆细碎子任务」。`subtask_needed` 为中间决策字段，parser 解析时忽略。
 
 拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`。
 

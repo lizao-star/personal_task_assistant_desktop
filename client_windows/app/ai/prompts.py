@@ -1,24 +1,14 @@
 """AI 提示词模板（M3）。
 
-两条硬性要求：
-1. 学术诚信红线写死在系统提示词里：只做拆解/提纲/检查清单，绝不代写；
-2. 统一 JSON 输出契约（对齐 docs/设计总纲.md 5.4），字段缺失时留空不瞎猜。
+要求：统一 JSON 输出契约（对齐 docs/设计总纲.md 5.4），字段缺失时留空不瞎猜。
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-# 学术诚信红线（必须出现在所有提示词中，不可删除）
-INTEGRITY_RULE = (
-    "学术诚信红线（最高优先级，任何情况下不可违反）："
-    "你绝不代写作业、论文、代码、考试答案等可直接提交的成品；"
-    "你只输出任务拆解、步骤提纲、检查清单和自测问题。"
-)
-
 SYSTEM_PROMPT = (
     "你是研究生个人任务助理，负责把自然语言转成结构化任务数据。\n"
-    f"{INTEGRITY_RULE}\n"
     "你必须且只能输出一个 JSON 对象，不要输出任何解释文字或 Markdown 代码块。\n"
     "信息不足的字段填 null，不要编造。"
 )
@@ -33,7 +23,8 @@ _PARSE_CONTRACT = """输出 JSON 字段定义：
   "estimate_min": "预计耗时（分钟数字），不确定填 null",
   "energy": "高|中|低，按任务难度判断；不确定填 null",
   "tags": ["标签1", "标签2"]，可空数组，
-  "subtasks": ["子任务1", "子任务2"]，3-5 个具体可执行动作，按顺序；简单任务可空数组,
+  "subtask_needed": true或false，先判断该任务是否有必要拆解子任务：一次动作即可完成（如取快递、回邮件、交表）则为false，多步骤任务为true,
+  "subtasks": ["子任务1", "子任务2"]，按需拆解，宁缺勿碎：subtask_needed为false时必须为空数组，绝不为凑数硬拆；为true时给 2-6 个具体可执行动作，按执行顺序,
   "checklist": ["完成前要确认的事项1", "…"]，可空数组,
   "confidence": 0.0到1.0之间的小数，表示你对以上解析的把握程度
 }
@@ -43,14 +34,12 @@ _PARSE_CONTRACT = """输出 JSON 字段定义：
 def build_parse_user_prompt(text: str, now: datetime) -> str:
     """构造「一句话 → 结构化任务」的用户消息。
 
-    附带当前时间，让「明天下午」「下周一」这类相对时间可以正确换算；
-    再次重复学术诚信红线（红线要求写入所有 AI 提示词，双重加固）。
+    附带当前时间，让「明天下午」「下周一」这类相对时间可以正确换算。
     """
     weekday = "一二三四五六日"[now.weekday()]
     return (
         f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}（星期{weekday}，时区 UTC+8）\n"
-        f"请把下面这句话解析为结构化任务。\n\n用户输入：{text}\n\n{_PARSE_CONTRACT}\n\n"
-        f"{INTEGRITY_RULE}"
+        f"请把下面这句话解析为结构化任务。\n\n用户输入：{text}\n\n{_PARSE_CONTRACT}"
     )
 
 
@@ -64,11 +53,11 @@ def build_breakdown_user_prompt(title: str, description: str, now: datetime) -> 
         f"补充描述：{desc}\n\n"
         "输出 JSON 字段定义：\n"
         "{\n"
-        '  "subtasks": ["具体可执行的步骤1", "步骤2", …]，3-8 步，按执行顺序，'
-        "每步都是可独立完成验证的动作,\n"
+        '  "subtasks": ["具体可执行的步骤1", "步骤2", …]，按需拆解，宁缺勿碎：'
+        "任务本身一次就能完成或步骤高度单一时输出空数组，绝不为凑数硬拆；"
+        "确需拆解时给 2-8 步，按执行顺序，每步都是可独立完成验证的动作,\n"
         '  "checklist": ["完成前要确认的事项", …]，可空数组,\n'
         '  "advice": "下一步怎么做的一段简短建议（50 字以内）",\n'
         '  "confidence": 0.0到1.0之间的小数\n'
         "}\n"
-        f"{INTEGRITY_RULE}"
     )
