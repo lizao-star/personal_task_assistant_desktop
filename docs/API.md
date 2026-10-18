@@ -104,27 +104,28 @@ Authorization: Bearer {tenant_access_token}
 
 ### 2.3 任务表字段映射
 
-| 本地 Task 属性 | 飞书字段名     |
-| -------------- | -------------- |
-| title          | 任务名         |
-| status         | 状态           |
-| priority       | 优先级         |
-| task_type      | 任务类型       |
-| due_at         | 截止时间       |
-| start_at       | 开始时间       |
-| estimate_min   | 预计耗时       |
-| voice          | 是否语音提醒   |
-| energy         | 精力需求       |
-| delay_count    | 延期次数       |
-| tags           | 标签           |
-| depends_on     | 依赖任务       |
-| reminder_rules | 提醒规则       |
-| description    | 描述           |
-| ai_breakdown   | AI拆解（M3）   |
-| checklist      | 检查清单（M3） |
-| external_id    | 外部ID（M2）   |
-| completed_at   | 完成时间       |
-| modified_at    | 修改时间（M2） |
+| 本地 Task 属性 | 飞书字段名                                       |
+| -------------- | ------------------------------------------------ |
+| title          | 任务名                                           |
+| status         | 状态                                             |
+| priority       | 优先级                                           |
+| task_type      | 任务类型                                         |
+| due_at         | 截止时间                                         |
+| start_at       | 开始时间                                         |
+| estimate_min   | 预计耗时                                         |
+| voice          | 是否语音提醒                                     |
+| energy         | 精力需求                                         |
+| delay_count    | 延期次数                                         |
+| tags           | 标签                                             |
+| depends_on     | 依赖任务                                         |
+| reminder_rules | 提醒规则                                         |
+| description    | 描述                                             |
+| ai_breakdown   | AI拆解（M3）                                     |
+| checklist      | 检查清单（M3）                                   |
+| ai_advice      | AI建议（M4.5）：策略建议（怎么做），不是动作清单 |
+| external_id    | 外部ID（M2）                                     |
+| completed_at   | 完成时间                                         |
+| modified_at    | 修改时间（M2）                                   |
 
 字段名常量：[constants.py](../client_windows/app/constants.py)
 
@@ -405,9 +406,16 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
   "subtask_needed": true,
   "subtasks": ["复习第三章", "完成习题1-5"],
   "checklist": ["核对答案"],
+  "advice": "先复习公式再做题，错题单独记，别边看答案边写。",
   "confidence": 0.85
 }
 ```
+
+> **三类输出语义边界**（M4.5）：
+> - `subtasks`：**需要投入时间**的执行步骤，可独立执行、能安排到日程；
+> - `checklist`：**一次性核对项**（带准考证/带身份证/核对答案），不做时间投入；
+> - `advice`：**策略建议**，回答「怎么做好」（重点、方法、取舍），80 字以内，不要重复动作清单。
+> `subtasks` 与 `checklist` 重复时以 `subtasks` 为准，parser 会从 `checklist` 中去重。
 
 > **按需拆解原则**：提示词要求 AI 先输出 `subtask_needed` 判断再填 `subtasks`；
 > 一次动作可完成的简单任务（取快递/回邮件等）`subtask_needed=false` 且 `subtasks` 为空，
@@ -417,20 +425,27 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 按 [设计总纲.md](设计总纲.md) 4.0 三层任务体系，解析契约扩展 `level` 字段：
 
-- `level`：`goal | task | subtask`，按时间尺度判定——目标项目表（1 个月以上）/ 任务表（1 天~1 个月）/ 子任务表（1 天内）；判不准一律 `task`。
+- `level`：`goal | task | subtask`，按**时间跨度 + 投入方式**双条件判定——L1 目标需「距截止 ≥30 天」且「需持续投入、可分阶段推进」；L2 任务 1~30 天；L3 子任务 1 天内；判不准一律 `task`。
+  - **远期但一次性办完的事（开会/体检/报到/面试/领取材料/办理手续）即使超 30 天，仍判 `task`**；只有标题里同时出现「准备/筹备/备考/复习/投稿/组织/撰写」等投入词才视为需要持续投入。
+- `level_confidence`（0~1）：模型对层级判定的自评置信度，独立于整体 `confidence`；`< 0.6` 时 UI 提示「层级可能判错，请确认」。
+- `advice`：策略建议（见上节语义边界），任务级写入「AI建议」列；目标级并入目标描述（目标表暂无独立建议列）。
+- 中间时间节点（报名截止、打印准考证、开考）**不单独设字段**：目标级写成带 `due_at` 的 `tasks` 记录，任务级写成 `subtasks` 里的一条执行步骤。
 - `level=goal` 时额外输出 `tasks` 数组（目标向下拆解为 L2 任务，每项可再带 `subtasks`），以及可选的 `description` / `key_results`：
 
 ```json
 {
   "level": "goal",
-  "title": "研一结束前完成小论文初稿",
-  "description": "12 月底前投出",
-  "key_results": ["完成文献综述", "完成实验", "写完初稿"],
+  "level_confidence": 0.82,
+  "title": "通过 2026 年 12 月六级笔试并取得 500+",
+  "description": "12-12 15:00-17:25 考试，目标 500 分以上",
+  "key_results": ["真题正确率 ≥ 75%", "听力稳定 180+"],
+  "advice": "重点是听力和阅读，占分七成；每天固定 1 小时真题精练，写作背 3 套模板即可。",
   "tasks": [
-    { "title": "完成文献综述", "due_at": "2026-11-15T23:59:00+08:00",
+    { "title": "打印笔试准考证", "due_at": "2026-12-01T09:00:00+08:00", "subtasks": [] },
+    { "title": "完成近 5 年真题精练", "due_at": "2026-12-10T23:59:00+08:00",
       "priority": "P1", "estimate_min": 600,
-      "subtasks": ["检索 20 篇文献", "写综述初稿"] },
-    { "title": "完成实验设计与数据采集", "due_at": "2026-12-20T23:59:00+08:00", "subtasks": [] }
+      "subtasks": ["听力真题 10 套", "阅读真题 10 套"] },
+    { "title": "写作与翻译模板训练", "due_at": "2026-12-08T23:59:00+08:00", "subtasks": [] }
   ],
   "confidence": 0.78
 }
@@ -438,17 +453,22 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 **校验规则（`parser.normalize_task`）**：
 
-| 场景                        | 处理                                                                          |
-| --------------------------- | ----------------------------------------------------------------------------- |
-| `level=goal` 且 `tasks` ≥ 2 | 保留 goal，`tasks` 最多 5 个，单任务 `subtasks` 最多 6 条                     |
-| `level=goal` 但 `tasks` < 2 | **降级为 task**，清空 `tasks`，`confidence` 压到 ≤ 0.4 → 写入收集箱待人工确认 |
-| `level` 缺失或非法          | 一律按 `task` 处理，不硬猜层级                                                |
-| `level=subtask`             | 不再向下拆解，`tasks` 与 `subtasks` 均清空                                    |
-| `subtask_needed=false`      | 清空 `subtasks`（宁缺勿碎，防模型凑数硬拆）                                   |
+| 场景                                         | 处理                                                                                 |
+| -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `level=goal` 且 `tasks` ≥ 2                  | 保留 goal，`tasks` 最多 5 个，单任务 `subtasks` 最多 6 条                            |
+| `level=goal` 但 `tasks` < 2                  | **降级为 task**，清空 `tasks`，`confidence` 压到 ≤ 0.4 → 写入收集箱待人工确认        |
+| `level=goal` 但无 `due_at`                   | 降级 task，`level_confidence` 记 0.4，原因写入 `level_note`                          |
+| `level=goal` 但距截止 < 30 天                | 降级 task，`level_confidence` 记 0.4                                                 |
+| `level=goal` 但命中一次性事件词              | 降级 task，`level_confidence` 记 0.4（远期会议也不会变目标）                         |
+| `level=task`，≥30 天 + 非一次性 + 有投入信号 | **追加一次按目标拆解的追问**（`GOAL_RETRY_SUFFIX`）；返回 goal 才采纳，否则保留 task |
+| `level` 缺失或非法                           | 一律按 `task` 处理，不硬猜层级                                                       |
+| `level=subtask`                              | 不再向下拆解，`tasks` 与 `subtasks` 均清空                                           |
+| `subtask_needed=false`                       | 清空 `subtasks`（宁缺勿碎，防模型凑数硬拆）                                          |
+| `subtasks` 与 `checklist` 重复               | 以 `subtasks` 为准，从 `checklist` 中去重                                            |
 
 落表顺序：先建目标拿 record_id → 建任务带「所属目标」关联 → 建子任务带「所属任务」关联；中途失败保留已写入部分，失败部分走离线队列重试（`goal_create` op，按「外部ID」幂等）。
 
-拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`。
+拆解建议（详情页）输出 `subtasks / checklist / advice / confidence`；新建解析额外输出 `level / level_confidence / advice`。
 
 ### 校验与容错（parser.py）
 
@@ -471,6 +491,7 @@ parser.parse_task / breakdown_task（编排：重试 1 次 + 兜底）
 
 - **新建任务 AI 解析**：与手动新建同链路（离线队列 `create` op，现已合并在同一对话框）；payload 额外携带 `subtasks`，推送阶段主任务落表后由 `_create_subtasks_safe` 写入子任务表并按「所属任务」关联（子任务表未配置/写入失败仅记日志，不影响主任务）。
 - **AI 拆解采纳**：新队列 op `ai_breakdown`（复用完成/延期的冲突检测基准 `base_ms`），推送时更新 `AI拆解/检查清单/AI建议` 三字段并写子任务。
+- **新建解析的 AI 建议**：任务级随 `create` op 写入「AI建议」列（`build_create_fields(ai_advice=...)`，为空时不写该列以免清空已有内容）；目标级无独立列，并入目标描述。
 - AI 只产出建议文本，**绝不自动改任务状态**；采纳与否由用户点击决定。
 
 实现：[ai/provider.py](../client_windows/app/ai/provider.py)、[ai/prompts.py](../client_windows/app/ai/prompts.py)、[ai/parser.py](../client_windows/app/ai/parser.py)、[services/sync.py](../client_windows/app/services/sync.py)
@@ -641,23 +662,24 @@ M4.5 起**编辑对话框与详情对话框合并**：双击任务行直接打�
 
 ### 14.2 可编辑字段（14 项 + 所属目标）
 
-| 界面控件 | changes 键       | 飞书字段     | 写入格式                                |
-| -------- | ---------------- | ------------ | --------------------------------------- |
-| 任务名   | `title`          | 任务名       | 文本（空串校验不通过）                  |
-| 状态     | `status`         | 状态         | 单选文本（`STATUS_OPTIONS`）            |
-| 优先级   | `priority`       | 优先级       | 单选文本                                |
-| 任务类型 | `task_type`      | 任务类型     | 单选文本                                |
-| 所属目标 | `goal_record_id` | 所属目标     | 关联 `list[record_id]` / 空数组（M4.5） |
-| 截止时间 | `due_at`         | 截止时间     | 毫秒时间戳 / 空                         |
-| 开始时间 | `start_at`       | 开始时间     | 毫秒时间戳 / 空                         |
-| 预计耗时 | `estimate_min`   | 预计耗时(分) | 整数（空按 0）                          |
-| 精力需求 | `energy`         | 精力需求     | 单选文本（含「未设置」空）              |
-| 语音提醒 | `voice`          | 语音提醒     | 布尔                                    |
-| 标签     | `tags`           | 标签         | 多选 `list[str]`                        |
-| 描述     | `description`    | 描述         | 文本                                    |
-| 提醒规则 | `reminder_rules` | 提醒规则     | 多选 `list[str]`                        |
-| AI 拆解  | `ai_breakdown`   | AI拆解       | 文本（多行，可留空）                    |
-| 检查清单 | `checklist`      | 检查清单     | 文本（多行，可留空）                    |
+| 界面控件 | changes 键       | 飞书字段     | 写入格式                                   |
+| -------- | ---------------- | ------------ | ------------------------------------------ |
+| 任务名   | `title`          | 任务名       | 文本（空串校验不通过）                     |
+| 状态     | `status`         | 状态         | 单选文本（`STATUS_OPTIONS`）               |
+| 优先级   | `priority`       | 优先级       | 单选文本                                   |
+| 任务类型 | `task_type`      | 任务类型     | 单选文本                                   |
+| 所属目标 | `goal_record_id` | 所属目标     | 关联 `list[record_id]` / 空数组（M4.5）    |
+| 截止时间 | `due_at`         | 截止时间     | 毫秒时间戳 / 空                            |
+| 开始时间 | `start_at`       | 开始时间     | 毫秒时间戳 / 空                            |
+| 预计耗时 | `estimate_min`   | 预计耗时(分) | 整数（空按 0）                             |
+| 精力需求 | `energy`         | 精力需求     | 单选文本（含「未设置」空）                 |
+| 语音提醒 | `voice`          | 语音提醒     | 布尔                                       |
+| 标签     | `tags`           | 标签         | 多选 `list[str]`                           |
+| 描述     | `description`    | 描述         | 文本                                       |
+| 提醒规则 | `reminder_rules` | 提醒规则     | 多选 `list[str]`                           |
+| AI 拆解  | `ai_breakdown`   | AI拆解       | 文本（多行，可留空）                       |
+| AI 建议  | `ai_advice`      | AI建议       | 文本（多行，可留空；策略建议，非动作清单） |
+| 检查清单 | `checklist`      | 检查清单     | 文本（多行，可留空）                       |
 
 > 详情页只读展示：子任务表（顺序/子任务名/状态/截止时间）。
 > 原顶部「状态概要」一行（状态/优先级/截止/类型/精力/延期次数/子任务进度）已移除——这些字段在下方表单里均已可编辑，重复展示属于冗余信息。
@@ -718,6 +740,21 @@ M4.5 起**编辑对话框与详情对话框合并**：双击任务行直接打�
 | （固定）      | 同步来源                 | 单选「客户端」                           |
 
 > 目标表需手工新增 `外部ID`（文本）、`同步来源`（单选）、`修改时间`（日期）三列，否则幂等与增量同步失效。
+> 目标级没有独立的「AI建议」列：对话框里编辑的策略建议会以「AI 建议：…」段落并入 `description` 一并写入。
+
+## 14B. 界面尺寸与滚动（小屏适配）
+
+字段较多的对话框不再靠「把窗口拉长」容纳内容，统一采用「**内容区可滚动 + 底部按钮固定**」：
+
+| 界面                                                                            | 实现                                                                                                                                      |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 新建任务对话框 [ui/task_dialog.py](../client_windows/app/ui/task_dialog.py)     | 所有字段放进 `QWidget` → `QScrollArea`（`setWidgetResizable(True)`、`NoFrame`），`stretch=1`；底部「创建 / 取消」按钮在滚动区外，始终可见 |
+| 任务详情对话框 [ui/detail_dialog.py](../client_windows/app/ui/detail_dialog.py) | 同上，滚动区外保留「AI 拆解此任务」「保存修改 / 取消」按钮                                                                                |
+| 主窗口 [ui/main_window.py](../client_windows/app/ui/main_window.py)             | 各分区（目标/逾期/待办/收集箱）表格自带滚动条，只限制窗口初始尺寸                                                                         |
+
+尺寸策略：先取 `QGuiApplication.primaryScreen().availableGeometry()`，窗口宽高取
+`min(设计尺寸, 可用区域 - 边距)`（对话框留 80px，主窗口高度留 120px 给任务栏），
+并设 `setMinimumSize(520, 360)` 保证仍可正常操作。缩到最小尺寸时滚动条自动出现。
 
 ## 15. 任务栏图标与开机自启
 

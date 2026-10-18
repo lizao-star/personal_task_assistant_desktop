@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -200,7 +201,14 @@ class MainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("个人任务助理")
         self.setWindowIcon(load_app_icon())
-        self.resize(860, 620)
+        # 小屏幕上不超出可见区域（各表格内部自带滚动条）
+        width, height = 860, 620
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width() - 80)
+            height = min(height, available.height() - 120)
+        self.resize(width, height)
         self._paused = False
         # M3：AI 供应商（未配置 Key 时为 None，AI 功能置灰）
         self._ai_provider: LLMProvider | None = None

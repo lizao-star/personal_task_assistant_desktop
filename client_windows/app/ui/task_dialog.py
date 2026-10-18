@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -77,7 +79,15 @@ class NewTaskDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("新建任务")
         self.setModal(True)
-        self.resize(640, 820)
+        self.setMinimumSize(520, 360)
+        # 小屏幕上不超出可见区域：内容区可滚动，底部按钮始终可见
+        width, height = 640, 820
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width() - 80)
+            height = min(height, available.height() - 80)
+        self.resize(width, height)
         self._provider = provider
         self._threshold = threshold
         self._draft: TaskDraft | None = None
@@ -91,6 +101,11 @@ class NewTaskDialog(QDialog):
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+
+        # ===== 可滚动内容区：字段多、屏幕小也能看全 =====
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
         # ===== 可选：一句话 AI 解析区 =====
         ai_group = QGroupBox("AI 辅助（可选：一句话自动判定层级并填充）")
@@ -128,7 +143,7 @@ class NewTaskDialog(QDialog):
         self.review_label.setVisible(False)
         ai_layout.addWidget(self.review_label)
 
-        layout.addWidget(ai_group)
+        content_layout.addWidget(ai_group)
 
         # ===== 层级选择（AI 自动判定，也可手动改） =====
         level_row = QHBoxLayout()
@@ -138,7 +153,7 @@ class NewTaskDialog(QDialog):
         self.level_combo.addItem("目标（L1，1 个月以上，需拆解）", LEVEL_GOAL)
         self.level_combo.currentIndexChanged.connect(self._on_level_changed)
         level_row.addWidget(self.level_combo, stretch=1)
-        layout.addLayout(level_row)
+        content_layout.addLayout(level_row)
 
         # ===== 任务字段表单 =====
         form = QFormLayout()
@@ -191,7 +206,14 @@ class NewTaskDialog(QDialog):
         self.desc_edit.setPlaceholderText("可选：补充说明、相关链接……")
         form.addRow("描述", self.desc_edit)
 
-        layout.addLayout(form)
+        self.advice_edit = QPlainTextEdit()
+        self.advice_edit.setFixedHeight(64)
+        self.advice_edit.setPlaceholderText(
+            "AI 给出的策略建议：重点、方法与取舍（不是动作清单）"
+        )
+        form.addRow("AI 建议", self.advice_edit)
+
+        content_layout.addLayout(form)
 
         # ===== 目标专属：目标属性 =====
         self.goal_group = QGroupBox("目标属性（L1）")
@@ -217,7 +239,7 @@ class NewTaskDialog(QDialog):
         self.key_results_edit.setFixedHeight(64)
         self.key_results_edit.setPlaceholderText("每行一条可验收的关键结果，如：完成 3 万字初稿")
         goal_form.addRow("关键结果", self.key_results_edit)
-        layout.addWidget(self.goal_group)
+        content_layout.addWidget(self.goal_group)
 
         # ===== 目标专属：L2 任务拆解草稿（可增删改） =====
         self.goal_tasks_group = QGroupBox("任务拆解（目标必须拆出 2~5 个任务）")
@@ -242,19 +264,28 @@ class NewTaskDialog(QDialog):
         gt_buttons.addWidget(del_btn)
         gt_buttons.addStretch()
         gt_layout.addLayout(gt_buttons)
-        layout.addWidget(self.goal_tasks_group)
+        content_layout.addWidget(self.goal_tasks_group)
 
         # ===== 任务专属：子任务 / 检查清单（每行一项） =====
         self.subtasks_label = QLabel("子任务（每行一个，可留空；AI 按需拆解，不硬拆细碎动作）")
-        layout.addWidget(self.subtasks_label)
+        content_layout.addWidget(self.subtasks_label)
         self.subtasks_edit = QPlainTextEdit()
         self.subtasks_edit.setFixedHeight(88)
-        layout.addWidget(self.subtasks_edit)
+        content_layout.addWidget(self.subtasks_edit)
 
-        layout.addWidget(QLabel("检查清单（每行一项，可留空）"))
+        content_layout.addWidget(QLabel("检查清单（每行一项，可留空）"))
         self.checklist_edit = QPlainTextEdit()
         self.checklist_edit.setFixedHeight(64)
-        layout.addWidget(self.checklist_edit)
+        content_layout.addWidget(self.checklist_edit)
+
+        content_layout.addStretch(1)
+
+        # 表单过长时可滚动查看（固定按钮区始终可见）
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        layout.addWidget(scroll, stretch=1)
 
         # ===== 按钮 =====
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -333,6 +364,7 @@ class NewTaskDialog(QDialog):
 
         self.title_edit.setText(draft.title)
         self.desc_edit.setPlainText(draft.description or "")
+        self.advice_edit.setPlainText(draft.advice or "")
         if draft.due_at is not None:
             self.due_edit.setDateTime(draft.due_at)
             self.goal_end_edit.setDateTime(draft.due_at)
@@ -357,6 +389,10 @@ class NewTaskDialog(QDialog):
                 LEVEL_SUBTASK: "子任务（按普通任务创建）",
             }.get(level, "任务")
             tips.append(f"判定层级：{label}，置信度 {draft.confidence:.2f}")
+        if draft.level_note:
+            tips.append(draft.level_note)
+        if draft.level_uncertain:
+            tips.append("层级判定把握不足，请确认上方「层级」是否正确")
         if level != LEVEL_GOAL and draft.due_at is None:
             tips.append("AI 未识别到截止时间，已置为明天 18:00，请确认")
         if level == LEVEL_GOAL and len(draft.tasks) < 2:
@@ -489,6 +525,11 @@ class NewTaskDialog(QDialog):
                 for s in self.key_results_edit.toPlainText().splitlines()
                 if s.strip()
             ]
+            # 目标表没有独立建议字段，把 AI 建议并入描述，避免信息丢失
+            goal_desc = self.desc_edit.toPlainText().strip()
+            advice = self.advice_edit.toPlainText().strip()
+            if advice:
+                goal_desc = f"{goal_desc}\n\nAI 建议：{advice}".strip()
             return {
                 "level": LEVEL_GOAL,
                 "goal": {
@@ -496,7 +537,7 @@ class NewTaskDialog(QDialog):
                     "level": self.goal_level_combo.currentText(),
                     "start_at": self.goal_start_edit.dateTime().toPython(),
                     "end_at": self.goal_end_edit.dateTime().toPython(),
-                    "description": self.desc_edit.toPlainText().strip(),
+                    "description": goal_desc,
                     "key_results": key_results,
                 },
                 "tasks": self._read_goal_tasks(),
@@ -531,6 +572,7 @@ class NewTaskDialog(QDialog):
             "ai_breakdown": "\n".join(
                 f"{i}. {s}" for i, s in enumerate(subtasks, 1)
             ),
+            "ai_advice": self.advice_edit.toPlainText().strip(),
             "checklist": "\n".join(checklist),
             # 低置信度写收集箱；正常写待办
             "status": STATUS_INBOX if low else STATUS_TODO,

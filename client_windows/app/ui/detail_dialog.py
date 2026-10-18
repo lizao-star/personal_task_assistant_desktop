@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -91,7 +92,15 @@ class TaskDetailDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("任务详情")
         self.setModal(True)
-        self.resize(620, 760)
+        self.setMinimumSize(520, 360)
+        # 小屏幕上不超出可见区域：内容区可滚动，底部按钮始终可见
+        width, height = 620, 760
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width() - 80)
+            height = min(height, available.height() - 80)
+        self.resize(width, height)
         self._task = task
         self._subtasks = subtasks or []
         self._ai_provider = ai_provider
@@ -127,6 +136,12 @@ class TaskDetailDialog(QDialog):
         self.breakdown_edit.setPlaceholderText("每行一个步骤，也可留空")
         self.breakdown_edit.setFixedHeight(80)
         content_layout.addWidget(self.breakdown_edit)
+
+        content_layout.addWidget(QLabel("AI 建议"))
+        self.advice_edit = QPlainTextEdit()
+        self.advice_edit.setPlaceholderText("AI 给出的策略建议：重点、方法与取舍")
+        self.advice_edit.setFixedHeight(64)
+        content_layout.addWidget(self.advice_edit)
 
         content_layout.addWidget(QLabel("检查清单"))
         self.checklist_edit = QPlainTextEdit()
@@ -295,6 +310,7 @@ class TaskDetailDialog(QDialog):
 
         self.desc_edit.setPlainText(task.description or "")
         self.breakdown_edit.setPlainText(task.ai_breakdown or "")
+        self.advice_edit.setPlainText(task.ai_advice or "")
         self.checklist_edit.setPlainText(task.checklist or "")
 
     def result_changes(self) -> dict:
@@ -367,6 +383,10 @@ class TaskDetailDialog(QDialog):
         ai_breakdown = self.breakdown_edit.toPlainText().strip()
         if ai_breakdown != (t.ai_breakdown or ""):
             changes["ai_breakdown"] = ai_breakdown
+
+        ai_advice = self.advice_edit.toPlainText().strip()
+        if ai_advice != (t.ai_advice or ""):
+            changes["ai_advice"] = ai_advice
 
         checklist = self.checklist_edit.toPlainText().strip()
         if checklist != (t.checklist or ""):
@@ -516,8 +536,10 @@ class TaskDetailDialog(QDialog):
         # 回填编辑区，并把基准值同步为回填值，避免「保存修改」重复提交同一内容
         self.breakdown_edit.setPlainText(breakdown)
         self.checklist_edit.setPlainText(checklist)
+        self.advice_edit.setPlainText(s.advice or "")
         self._task.ai_breakdown = breakdown.strip()
         self._task.checklist = checklist.strip()
+        self._task.ai_advice = (s.advice or "").strip()
         self.apply_requested.emit(
             {
                 "record_id": self._task.record_id,
