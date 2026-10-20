@@ -283,7 +283,7 @@ class SyncService:
     def _push_goal_edit(
         self, payload: dict[str, Any], force: bool = False
     ) -> tuple[bool, dict[str, Any] | None]:
-        """推送「编辑目标 / 进度回写」，与任务编辑同链路（冲突检测 + 更新）。
+        """推送「编辑目标」，与任务编辑同链路（冲突检测 + 更新）。
 
         目标表与任务表的「修改时间」列同名，冲突检测直接复用
         get_remote_modified_ms（把 table_id 换成目标表即可）。

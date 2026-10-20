@@ -760,7 +760,7 @@ M4.5 起**编辑对话框与详情对话框合并**：双击任务行直接打�
 > 否则增量 search 会报 `1254018 InvalidFilter`。
 > 目标级没有独立的「AI建议」列：对话框里编辑的策略建议会以「AI 建议：…」段落并入 `description` 一并写入。
 
-### 14A.4 目标编辑与进度自动回写（`goal_edit` op）
+### 14A.4 目标编辑（`goal_edit` op）
 
 双击目标行弹出 [ui/goal_dialog.py](../client_windows/app/ui/goal_dialog.py)（与任务详情同一套「内容滚动 + 按钮固定」结构），
 点「保存修改」只把真正改动的字段入队：
@@ -772,19 +772,13 @@ GoalEditDialog.save_requested {record_id, changes, title}
   → SyncService._push_goal_edit：冲突检测（目标表「修改时间」）→ update_goal
 ```
 
-- 字段映射复用 14A.3，另有 `progress` → 进度（数字）；日期改动传 null 表示清空该列；
+- 字段映射复用 14A.3；日期改动传 null 表示清空该列；
 - 冲突弹窗复用任务冲突链路（`op_type=goal_edit`，标签「编辑目标」），可覆盖或放弃。
 
-**进度自动回写**：每轮同步成功后（`main._sync_goal_progresses`）按
-
-```
-目标进度 = 目标下已结束任务数 / 任务总数 × 100（无任务不写）
-```
-
-重算各目标进度，与飞书当前值不同才入队 `goal_edit`（只写「进度」列）并立即推送。
-写回后目标表「修改时间」更新，增量同步拉回新值与重算值一致，不会形成写循环。
-已结束（完成/取消）的目标不再自动更新。**飞书「进度」列保持普通数字类型**——
-改成公式/查找引用会导致客户端写回失败。
+**进度只读**：「进度」列已改为**飞书公式字段**（格式=进度，自动计算已完成关联任务占比），
+客户端只展示、不写回——`build_goal_edit_fields` 不映射 `progress` 键，
+也不再有客户端侧进度回写逻辑。解析侧用 `parse_progress` 兼容公式返回的 0~1
+小数（`0.4 → 40`）、旧整数（`45 → 45`）与「45%」文本，无效值按 0 处理。
 
 ## 14B. 界面尺寸与滚动（小屏适配）
 
@@ -794,7 +788,7 @@ GoalEditDialog.save_requested {record_id, changes, title}
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | 新建任务对话框 [ui/task_dialog.py](../client_windows/app/ui/task_dialog.py)     | 所有字段放进 `QWidget` → `QScrollArea`（`setWidgetResizable(True)`、`NoFrame`），`stretch=1`；底部「创建 / 取消」按钮在滚动区外，始终可见 |
 | 任务详情对话框 [ui/detail_dialog.py](../client_windows/app/ui/detail_dialog.py) | 同上，滚动区外保留「AI 拆解此任务」「保存修改 / 取消」按钮                                                                                |
-| 目标详情对话框 [ui/goal_dialog.py](../client_windows/app/ui/goal_dialog.py)     | 同上，底部「保存修改 / 取消」按钮固定；进度为只读标签（自动回写）                                                                         |
+| 目标详情对话框 [ui/goal_dialog.py](../client_windows/app/ui/goal_dialog.py)     | 同上，底部「保存修改 / 取消」按钮固定；进度为只读标签（飞书公式列自动计算）                                                               |
 | 主窗口 [ui/main_window.py](../client_windows/app/ui/main_window.py)             | 各分区（目标/逾期/待办/收集箱）表格自带滚动条，只限制窗口初始尺寸                                                                         |
 
 尺寸策略：先取 `QGuiApplication.primaryScreen().availableGeometry()`，窗口宽高取

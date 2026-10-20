@@ -26,10 +26,8 @@ from app.feishu.repository import (
     build_goal_fields,
     build_goal_edit_fields,
     build_monitor_log_fields,
-    compute_goal_progresses,
     generate_external_id,
-    Goal,
-    Task,
+    parse_progress,
 )
 
 
@@ -240,45 +238,36 @@ class TestBuildGoalEditFields(unittest.TestCase):
         self.assertIsNone(fields[GoalFields.START_AT])
         self.assertIsNone(fields[GoalFields.END_AT])
 
-    def test_progress_written(self):
-        fields = build_goal_edit_fields({"progress": 50})
-        self.assertEqual(fields, {GoalFields.PROGRESS: 50})
+    def test_progress_never_written(self):
+        """「进度」是飞书公式列（自动计算），编辑字段一律不写回进度。"""
+        fields = build_goal_edit_fields({"progress": 50, "title": "改名"})
+        self.assertNotIn(GoalFields.PROGRESS, fields)
+        self.assertEqual(fields, {GoalFields.TITLE: "改名"})
 
 
-class TestComputeGoalProgresses(unittest.TestCase):
-    """M4.5：目标进度自动回写——按目标下已结束任务占比计算。"""
+class TestParseProgress(unittest.TestCase):
+    """M4.5：进度列改为飞书公式字段后的解析兼容（0.4 小数 → 40）。"""
 
-    @staticmethod
-    def _task(record_id: str, status: str, goal_id: str = "recG1") -> Task:
-        return Task(
-            record_id=record_id,
-            title=record_id,
-            status=status,
-            goal_record_id=goal_id,
-        )
+    def test_fraction_from_formula_field(self):
+        """公式 + 进度格式 API 返回 0~1 小数比例。"""
+        self.assertEqual(parse_progress(0.4), 40)
+        self.assertEqual(parse_progress(0.05), 5)
+        self.assertEqual(parse_progress(1), 100)
+        self.assertEqual(parse_progress(0), 0)
 
-    def test_progress_by_finished_ratio(self):
-        tasks = [
-            self._task("t1", STATUS_DONE),
-            self._task("t2", STATUS_DONE),
-            self._task("t3", STATUS_TODO),
-            self._task("t4", "进行中"),
-        ]
-        result = compute_goal_progresses(tasks)
-        self.assertEqual(result, {"recG1": 50})
+    def test_legacy_integer(self):
+        """兼容旧的 0~100 整数（普通数字列时期）。"""
+        self.assertEqual(parse_progress(45), 45)
+        self.assertEqual(parse_progress(100), 100)
 
-    def test_task_without_goal_ignored(self):
-        tasks = [self._task("t1", STATUS_DONE, goal_id="")]
-        self.assertEqual(compute_goal_progresses(tasks), {})
+    def test_percent_text(self):
+        """兼容「45%」文本形态。"""
+        self.assertEqual(parse_progress("45%"), 45)
 
-    def test_goal_without_tasks_missing(self):
-        """目标下没有任务时不产生键（调用方据此跳过该目标）。"""
-        tasks = [self._task("t1", STATUS_DONE, goal_id="recOther")]
-        self.assertEqual(compute_goal_progresses(tasks), {"recOther": 100})
-
-    def test_all_done_is_100(self):
-        tasks = [self._task("t1", STATUS_DONE), self._task("t2", STATUS_DONE)]
-        self.assertEqual(compute_goal_progresses(tasks), {"recG1": 100})
+    def test_invalid_returns_zero(self):
+        self.assertEqual(parse_progress(None), 0)
+        self.assertEqual(parse_progress(""), 0)
+        self.assertEqual(parse_progress("abc"), 0)
 
 
 class TestGoalRelationFields(unittest.TestCase):

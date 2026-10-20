@@ -5,8 +5,8 @@
 1. 查看：层级 / 状态 / 起止 / 进度 / 描述 / 关键结果；
 2. 编辑：字段直接改，点「保存修改」只把真正改动的字段交给 main.py
    走离线队列 + 冲突检测写回飞书目标表；
-3. 进度为只读展示：由客户端按「目标下已完成任务占比」自动计算并写回，
-   手工修改会被下一轮同步覆盖。
+3. 进度为只读展示：由飞书目标表的公式列自动计算（已完成关联任务占比），
+   客户端只负责展示，不做写回。
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ class GoalEditDialog(QDialog):
         end_row.addWidget(self.end_clear)
         form.addRow("结束时间", end_row)
 
-        # 进度只读：由客户端按已完成任务占比自动计算写回
+        # 进度为只读展示：由飞书公式列（已完成关联任务占比）自动计算
         self.progress_label = QLabel()
         self.progress_label.setStyleSheet("color: #666;")
         form.addRow("进度", self.progress_label)
@@ -154,7 +154,7 @@ class GoalEditDialog(QDialog):
         self._set_datetime(self.end_edit, self.end_clear, goal.end_at)
 
         self.progress_label.setText(
-            f"{goal.progress}%（由客户端按已完成任务占比自动更新，无需手动修改）"
+            f"{goal.progress}%（由飞书公式列自动计算，客户端只读展示）"
         )
         self.description_edit.setPlainText(goal.description)
         self.key_results_edit.setPlainText(goal.key_results)

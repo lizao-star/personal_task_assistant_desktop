@@ -33,7 +33,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .ai.provider import DeepSeekProvider
 from .config import DATA_DIR, load_config
-from .constants import GoalFields, LEVEL_GOAL, STATUS_DONE, STATUS_TODO
+from .constants import LEVEL_GOAL, STATUS_DONE, STATUS_TODO
 from .feishu.client import FeishuClient
 from .feishu.repository import (
     Goal,
@@ -46,7 +46,6 @@ from .feishu.repository import (
     build_edit_fields,
     build_goal_edit_fields,
     build_goal_fields,
-    compute_goal_progresses,
     generate_external_id,
     get_overdue_tasks,
     get_today_tasks,
@@ -310,8 +309,6 @@ class AssistantApp(QObject):
         """同步成功：渲染并立即检查一次提醒。"""
         self._cache.set_meta("last_sync", datetime.now().isoformat(timespec="seconds"))
         self.window.show_warning("")  # 成功后清除警告
-        # 进度自动回写：目标下任务完成情况变化时，把新进度写回飞书
-        self._sync_goal_progresses(tasks)
         self._render(tasks)
         self._refresh_pending_label()
         # 立即检查提醒（定时器也会检查，这里保证实时性）
@@ -555,7 +552,7 @@ class AssistantApp(QObject):
         return None
 
     # ------------------------------------------------------------------
-    # M4.5：目标编辑与进度自动回写
+    # M4.5：目标编辑（进度由飞书公式列自动计算，客户端只读展示）
     # ------------------------------------------------------------------
     def _on_goal_detail(self, record_id: str) -> None:
         """双击目标行：从缓存取目标，弹出可编辑的目标详情对话框。"""
@@ -609,42 +606,6 @@ class AssistantApp(QObject):
                 goals[i] = goal
                 break
         self._cache.replace_goals(goals)
-
-    def _sync_goal_progresses(self, tasks: list[Task]) -> None:
-        """目标进度自动回写：进度 = 目标下已结束任务占比，变化才入队。
-
-        每轮同步成功后调用。进度写回后飞书「修改时间」更新，增量同步
-        会把新值拉回本地，与重算值一致，因此不会形成写循环。
-        已结束（完成/取消）的目标不再更新进度。
-        """
-        progresses = compute_goal_progresses(tasks)
-        if not progresses:
-            return
-        goals = self._cache.load_goals()
-        changed = False
-        for goal in goals:
-            new_progress = progresses.get(goal.record_id)
-            if (
-                new_progress is None
-                or goal.is_finished
-                or new_progress == goal.progress
-            ):
-                continue
-            self._cache.enqueue_op(
-                "goal_edit",
-                {
-                    "record_id": goal.record_id,
-                    "fields": {GoalFields.PROGRESS: new_progress},
-                    "base_ms": goal.modified_ms,
-                    "title": goal.title,
-                },
-            )
-            goal.progress = new_progress  # 乐观更新，界面立即显示新进度
-            changed = True
-        if changed:
-            self._cache.replace_goals(goals)
-            # 立即推送进度变更，不等下一个轮询周期
-            self.start_incremental_sync()
 
     def _refresh_pending_label(self) -> None:
         """刷新状态栏待推送条数。"""

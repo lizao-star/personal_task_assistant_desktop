@@ -66,6 +66,25 @@ def parse_number(value: Any) -> int:
         return 0
 
 
+def parse_progress(value: Any) -> int:
+    """解析「进度」字段为 0~100 整数。
+
+    进度列已改为飞书公式字段（格式=进度）：API 返回 0.4 这类小数比例；
+    兼容旧的 0~100 整数与「45%」百分比文本；无效一律按 0 处理。
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if num <= 1:
+        return round(num * 100)
+    return int(num)
+
+
 def parse_datetime(value: Any) -> datetime | None:
     """解析日期字段（毫秒时间戳）为本地 datetime。
 
@@ -311,7 +330,7 @@ def to_goal(record: dict[str, Any]) -> Goal:
         end_at=parse_datetime(fields.get(GoalFields.END_AT)),
         description=parse_text(fields.get(GoalFields.DESCRIPTION)),
         key_results=parse_text(fields.get(GoalFields.KEY_RESULTS)),
-        progress=parse_number(fields.get(GoalFields.PROGRESS)),
+        progress=parse_progress(fields.get(GoalFields.PROGRESS)),
         external_id=parse_text(fields.get(GoalFields.EXTERNAL_ID)),
         modified_at=record_modified_at(record, GoalFields.UPDATED_AT),
     )
@@ -340,14 +359,6 @@ def attach_goal_tasks(goals: list[Goal], tasks: list[Task]) -> list[Goal]:
 def get_active_goals(goals: list[Goal]) -> list[Goal]:
     """活跃目标：未完成、未取消（主窗口目标计划区展示用）。"""
     return [g for g in goals if not g.is_finished]
-
-
-def _progress_percent(goals_tasks: list[Task]) -> int:
-    """按已完成任务数计算进度百分比（0~100）。"""
-    if not goals_tasks:
-        return 0
-    done = sum(1 for t in goals_tasks if t.is_finished)
-    return int(round(done * 100 / len(goals_tasks)))
 
 
 def group_subtasks(
@@ -721,7 +732,7 @@ def update_goal(
     record_id: str,
     fields: dict[str, Any],
 ) -> Goal:
-    """更新目标/项目记录（编辑、进度回写共用），返回更新后的 Goal。"""
+    """更新目标/项目记录（目标编辑写回），返回更新后的 Goal。"""
     record = client.update_record(app_token, table_id, record_id, fields)
     return to_goal(record)
 
@@ -731,9 +742,10 @@ def build_goal_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
 
     与 build_edit_fields 同语义：只写 changes 中出现的键，避免误清空；
     日期 datetime -> 毫秒时间戳，None -> null（清空该列）。
+    「进度」是飞书公式字段（自动计算），禁止通过编辑写回，故不在此映射。
 
     支持的键（与 Goal 属性同名）：
-        title / level / status / start_at / end_at / description / key_results / progress
+        title / level / status / start_at / end_at / description / key_results
     """
     fields: dict[str, Any] = {}
 
@@ -753,22 +765,7 @@ def build_goal_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
         fields[GoalFields.DESCRIPTION] = changes.get("description") or ""
     if "key_results" in changes:
         fields[GoalFields.KEY_RESULTS] = changes.get("key_results") or ""
-    if "progress" in changes:
-        fields[GoalFields.PROGRESS] = int(changes.get("progress") or 0)
     return fields
-
-
-def compute_goal_progresses(tasks: list[Task]) -> dict[str, int]:
-    """按任务的「所属目标」聚合计算每个目标的进度百分比（0~100）。
-
-    进度 = 该目标下已结束任务数 / 全部任务数（无任务则为 0）。
-    主线程在每轮同步后调用，把结果与目标当前进度比对，变化才写回。
-    """
-    grouped: dict[str, list[Task]] = {}
-    for task in tasks:
-        if task.goal_record_id:
-            grouped.setdefault(task.goal_record_id, []).append(task)
-    return {goal_id: _progress_percent(owned) for goal_id, owned in grouped.items()}
 
 
 # ----------------------------------------------------------------------
