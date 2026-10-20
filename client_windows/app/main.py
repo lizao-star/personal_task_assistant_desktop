@@ -33,9 +33,10 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .ai.provider import DeepSeekProvider
 from .config import DATA_DIR, load_config
-from .constants import LEVEL_GOAL, STATUS_DONE, STATUS_TODO
+from .constants import GoalFields, LEVEL_GOAL, STATUS_DONE, STATUS_TODO
 from .feishu.client import FeishuClient
 from .feishu.repository import (
+    Goal,
     Task,
     attach_goal_tasks,
     build_ai_breakdown_fields,
@@ -43,7 +44,9 @@ from .feishu.repository import (
     build_create_fields,
     build_defer_fields,
     build_edit_fields,
+    build_goal_edit_fields,
     build_goal_fields,
+    compute_goal_progresses,
     generate_external_id,
     get_overdue_tasks,
     get_today_tasks,
@@ -60,6 +63,7 @@ from .services.pomodoro import STATE_IDLE, PomodoroTimer
 from .services.priority import rank_tasks
 from .services.reminder import Notifier, ReminderEngine
 from .services.sync import SyncService
+from .ui.goal_dialog import GoalEditDialog
 from .ui.main_window import MainWindow
 from .ui.tray import TrayController, load_app_icon
 
@@ -203,6 +207,7 @@ class AssistantApp(QObject):
         self.window.detail_requested.connect(self._on_detail)
         self.window.breakdown_apply_requested.connect(self._on_breakdown_apply)
         self.window.edit_requested.connect(self._on_edit)
+        self.window.goal_edit_requested.connect(self._on_goal_detail)
 
         # 托盘
         self.tray.show_action.triggered.connect(self._show_window)
@@ -305,6 +310,8 @@ class AssistantApp(QObject):
         """同步成功：渲染并立即检查一次提醒。"""
         self._cache.set_meta("last_sync", datetime.now().isoformat(timespec="seconds"))
         self.window.show_warning("")  # 成功后清除警告
+        # 进度自动回写：目标下任务完成情况变化时，把新进度写回飞书
+        self._sync_goal_progresses(tasks)
         self._render(tasks)
         self._refresh_pending_label()
         # 立即检查提醒（定时器也会检查，这里保证实时性）
@@ -336,7 +343,7 @@ class AssistantApp(QObject):
             btn = QMessageBox.question(
                 self.window,
                 "检测到云端变更",
-                f"任务「{title}」的{action}操作检测到云端已被其他人/设备修改。\n"
+                f"「{title}」的{action}操作检测到云端已被其他人/设备修改。\n"
                 "是否仍要用本地版本覆盖云端？",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -546,6 +553,98 @@ class AssistantApp(QObject):
             if t.record_id == record_id:
                 return t
         return None
+
+    # ------------------------------------------------------------------
+    # M4.5：目标编辑与进度自动回写
+    # ------------------------------------------------------------------
+    def _on_goal_detail(self, record_id: str) -> None:
+        """双击目标行：从缓存取目标，弹出可编辑的目标详情对话框。"""
+        goal = self._find_cached_goal(record_id)
+        if goal is None:
+            return
+        dialog = GoalEditDialog(goal, parent=self.window)
+        dialog.save_requested.connect(self._on_goal_edit)
+        dialog.exec()
+
+    def _on_goal_edit(self, payload: dict) -> None:
+        """编辑目标字段——入队 + 乐观更新本地缓存（与任务编辑同链路）。"""
+        record_id = payload.get("record_id", "")
+        changes = payload.get("changes") or {}
+        goal = self._find_cached_goal(record_id)
+        if goal is None or not changes:
+            return
+        fields = build_goal_edit_fields(changes)
+        if not fields:
+            return
+        self._cache.enqueue_op(
+            "goal_edit",
+            {
+                "record_id": record_id,
+                "fields": fields,
+                "base_ms": goal.modified_ms,
+                "title": payload.get("title", goal.title),
+            },
+        )
+        # 乐观更新：把变更直接写回本地 Goal，目标计划区立即生效
+        for key, value in changes.items():
+            if hasattr(goal, key):
+                setattr(goal, key, value)
+        self._replace_cached_goal(goal)
+        self._render(self._cache.load_tasks())
+        self._refresh_pending_label()
+        self.start_incremental_sync()
+
+    def _find_cached_goal(self, record_id: str) -> Goal | None:
+        """从本地缓存中按 record_id 找目标。"""
+        for g in self._cache.load_goals():
+            if g.record_id == record_id:
+                return g
+        return None
+
+    def _replace_cached_goal(self, goal: Goal) -> None:
+        """把单条目标的乐观更新结果写回缓存（整体替换列表）。"""
+        goals = self._cache.load_goals()
+        for i, g in enumerate(goals):
+            if g.record_id == goal.record_id:
+                goals[i] = goal
+                break
+        self._cache.replace_goals(goals)
+
+    def _sync_goal_progresses(self, tasks: list[Task]) -> None:
+        """目标进度自动回写：进度 = 目标下已结束任务占比，变化才入队。
+
+        每轮同步成功后调用。进度写回后飞书「修改时间」更新，增量同步
+        会把新值拉回本地，与重算值一致，因此不会形成写循环。
+        已结束（完成/取消）的目标不再更新进度。
+        """
+        progresses = compute_goal_progresses(tasks)
+        if not progresses:
+            return
+        goals = self._cache.load_goals()
+        changed = False
+        for goal in goals:
+            new_progress = progresses.get(goal.record_id)
+            if (
+                new_progress is None
+                or goal.is_finished
+                or new_progress == goal.progress
+            ):
+                continue
+            self._cache.enqueue_op(
+                "goal_edit",
+                {
+                    "record_id": goal.record_id,
+                    "fields": {GoalFields.PROGRESS: new_progress},
+                    "base_ms": goal.modified_ms,
+                    "title": goal.title,
+                },
+            )
+            goal.progress = new_progress  # 乐观更新，界面立即显示新进度
+            changed = True
+        if changed:
+            self._cache.replace_goals(goals)
+            # 立即推送进度变更，不等下一个轮询周期
+            self.start_incremental_sync()
 
     def _refresh_pending_label(self) -> None:
         """刷新状态栏待推送条数。"""

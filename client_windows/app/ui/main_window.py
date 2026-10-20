@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMenu,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -196,6 +195,7 @@ class MainWindow(QWidget):
     detail_requested = Signal(str)                        # record_id（查看详情）
     breakdown_apply_requested = Signal(dict)              # M3：采纳 AI 拆解建议
     edit_requested = Signal(dict)                         # 编辑任务（M2 写回扩展）
+    goal_edit_requested = Signal(str)                     # 目标 record_id（编辑目标）
 
     def __init__(self):
         super().__init__()
@@ -507,26 +507,11 @@ class MainWindow(QWidget):
             self.detail_requested.emit(rid)
 
     def _on_goal_double_clicked(self, row: int, _col: int) -> None:
-        """双击目标行：只读展示目标信息（本期不做目标编辑写回）。"""
+        """双击目标行：打开可编辑的目标详情页（写回走离线队列）。"""
         goal = self.goal_table.goal_from_row(row)
-        if goal is None:
+        if goal is None or not goal.record_id:
             return
-        lines = [
-            f"层级：{goal.level or '-'}    状态：{goal.status or '-'}    进度：{goal.progress}%",
-            f"起止：{goal.start_at.strftime('%Y-%m-%d') if goal.start_at else '?'}"
-            f" → {goal.end_at.strftime('%Y-%m-%d') if goal.end_at else '?'}",
-            f"关联任务：{len(goal.task_record_ids)} 个",
-        ]
-        if goal.description:
-            lines.append(f"\n描述：\n{goal.description}")
-        if goal.key_results:
-            lines.append(f"\n关键结果：\n{goal.key_results}")
-        box = QMessageBox(self)
-        box.setWindowTitle("目标详情")
-        box.setText(goal.title)
-        box.setInformativeText("\n".join(lines))
-        box.setStandardButtons(QMessageBox.Ok)
-        box.exec()
+        self.goal_edit_requested.emit(goal.record_id)
 
     def _on_complete(self) -> None:
         rid = self._current_selected_record_id()

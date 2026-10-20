@@ -36,6 +36,7 @@ from ..feishu.repository import (
     list_tasks,
     to_goal,
     to_task,
+    update_goal,
     update_task,
 )
 from ..constants import GoalFields, TaskFields
@@ -56,6 +57,7 @@ class SyncService:
         "ai_breakdown": "AI 拆解",
         "edit": "编辑",
         "goal_create": "新建目标",
+        "goal_edit": "编辑目标",
     }
 
     def __init__(
@@ -170,6 +172,9 @@ class SyncService:
         if op_type == "goal_create":
             return self._push_goal_create(payload), None
 
+        if op_type == "goal_edit":
+            return self._push_goal_edit(payload, force=op.force)
+
         if op_type in ("complete", "defer", "ai_breakdown", "edit"):
             record_id = payload.get("record_id", "")
             fields = payload.get("fields", {})
@@ -274,6 +279,37 @@ class SyncService:
             except Exception as e:  # noqa: BLE001 回填失败不阻塞队列
                 logger.warning("回填任务依赖失败（任务 %d）: %s", i, e)
         return True
+
+    def _push_goal_edit(
+        self, payload: dict[str, Any], force: bool = False
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """推送「编辑目标 / 进度回写」，与任务编辑同链路（冲突检测 + 更新）。
+
+        目标表与任务表的「修改时间」列同名，冲突检测直接复用
+        get_remote_modified_ms（把 table_id 换成目标表即可）。
+        返回 (是否成功, 冲突信息)；冲突时 op 保留，由 UI 弹窗让用户决定。
+        """
+        record_id = payload.get("record_id", "")
+        fields = payload.get("fields", {})
+        base_ms = int(payload.get("base_ms", 0))
+        title = payload.get("title", "")
+        if not self._goal_table_id or not record_id or not fields:
+            return True, None
+
+        if not force and base_ms > 0:
+            remote_ms = get_remote_modified_ms(
+                self._client, self._app_token, self._goal_table_id, record_id
+            )
+            if remote_ms > base_ms:
+                return False, {
+                    "op_id": payload.get("op_id", ""),
+                    "op_type": "goal_edit",
+                    "title": title or "目标",
+                    "record_id": record_id,
+                }
+
+        update_goal(self._client, self._app_token, self._goal_table_id, record_id, fields)
+        return True, None
 
     def _create_subtasks_safe(self, parent_record_id: str, titles: list[str]) -> None:
         """写入子任务并关联主任务；子任务表未配置或写入失败都不抛出。"""

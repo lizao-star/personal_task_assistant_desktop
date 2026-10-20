@@ -24,8 +24,12 @@ from app.feishu.repository import (
     build_defer_fields,
     build_edit_fields,
     build_goal_fields,
+    build_goal_edit_fields,
     build_monitor_log_fields,
+    compute_goal_progresses,
     generate_external_id,
+    Goal,
+    Task,
 )
 
 
@@ -199,6 +203,82 @@ class TestBuildGoalFields(unittest.TestCase):
     def test_key_results_accepts_plain_text(self):
         fields = build_goal_fields(title="x", key_results="已完成开题")
         self.assertEqual(fields[GoalFields.KEY_RESULTS], "已完成开题")
+
+
+class TestBuildGoalEditFields(unittest.TestCase):
+    """M4.5：目标编辑字段构建（只写改动键，日期可清空）。"""
+
+    def test_partial_changes_only(self):
+        fields = build_goal_edit_fields({"title": "新目标名"})
+        self.assertEqual(fields, {GoalFields.TITLE: "新目标名"})
+
+    def test_full_edit(self):
+        start = datetime(2026, 10, 1, 8, 0, 0)
+        end = datetime(2026, 12, 31, 23, 0, 0)
+        fields = build_goal_edit_fields(
+            {
+                "title": "学期科研计划",
+                "level": "季",
+                "status": GOAL_STATUS_DOING,
+                "start_at": start,
+                "end_at": end,
+                "description": "按月推进",
+                "key_results": "- 投稿\n- 实验",
+            }
+        )
+        self.assertEqual(fields[GoalFields.TITLE], "学期科研计划")
+        self.assertEqual(fields[GoalFields.LEVEL], "季")
+        self.assertEqual(fields[GoalFields.STATUS], GOAL_STATUS_DOING)
+        self.assertEqual(fields[GoalFields.START_AT], int(start.timestamp() * 1000))
+        self.assertEqual(fields[GoalFields.END_AT], int(end.timestamp() * 1000))
+        self.assertEqual(fields[GoalFields.DESCRIPTION], "按月推进")
+        self.assertEqual(fields[GoalFields.KEY_RESULTS], "- 投稿\n- 实验")
+
+    def test_clear_dates_writes_null(self):
+        """None 表示清空该日期列，应写 null。"""
+        fields = build_goal_edit_fields({"start_at": None, "end_at": None})
+        self.assertIsNone(fields[GoalFields.START_AT])
+        self.assertIsNone(fields[GoalFields.END_AT])
+
+    def test_progress_written(self):
+        fields = build_goal_edit_fields({"progress": 50})
+        self.assertEqual(fields, {GoalFields.PROGRESS: 50})
+
+
+class TestComputeGoalProgresses(unittest.TestCase):
+    """M4.5：目标进度自动回写——按目标下已结束任务占比计算。"""
+
+    @staticmethod
+    def _task(record_id: str, status: str, goal_id: str = "recG1") -> Task:
+        return Task(
+            record_id=record_id,
+            title=record_id,
+            status=status,
+            goal_record_id=goal_id,
+        )
+
+    def test_progress_by_finished_ratio(self):
+        tasks = [
+            self._task("t1", STATUS_DONE),
+            self._task("t2", STATUS_DONE),
+            self._task("t3", STATUS_TODO),
+            self._task("t4", "进行中"),
+        ]
+        result = compute_goal_progresses(tasks)
+        self.assertEqual(result, {"recG1": 50})
+
+    def test_task_without_goal_ignored(self):
+        tasks = [self._task("t1", STATUS_DONE, goal_id="")]
+        self.assertEqual(compute_goal_progresses(tasks), {})
+
+    def test_goal_without_tasks_missing(self):
+        """目标下没有任务时不产生键（调用方据此跳过该目标）。"""
+        tasks = [self._task("t1", STATUS_DONE, goal_id="recOther")]
+        self.assertEqual(compute_goal_progresses(tasks), {"recOther": 100})
+
+    def test_all_done_is_100(self):
+        tasks = [self._task("t1", STATUS_DONE), self._task("t2", STATUS_DONE)]
+        self.assertEqual(compute_goal_progresses(tasks), {"recG1": 100})
 
 
 class TestGoalRelationFields(unittest.TestCase):

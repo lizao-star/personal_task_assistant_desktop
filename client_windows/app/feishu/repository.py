@@ -714,6 +714,63 @@ def create_goal(
     return to_goal(record)
 
 
+def update_goal(
+    client: FeishuClient,
+    app_token: str,
+    table_id: str,
+    record_id: str,
+    fields: dict[str, Any],
+) -> Goal:
+    """更新目标/项目记录（编辑、进度回写共用），返回更新后的 Goal。"""
+    record = client.update_record(app_token, table_id, record_id, fields)
+    return to_goal(record)
+
+
+def build_goal_edit_fields(changes: dict[str, Any]) -> dict[str, Any]:
+    """把目标编辑对话框的字段变更组装为飞书「目标/项目表」fields 字典。
+
+    与 build_edit_fields 同语义：只写 changes 中出现的键，避免误清空；
+    日期 datetime -> 毫秒时间戳，None -> null（清空该列）。
+
+    支持的键（与 Goal 属性同名）：
+        title / level / status / start_at / end_at / description / key_results / progress
+    """
+    fields: dict[str, Any] = {}
+
+    if "title" in changes:
+        fields[GoalFields.TITLE] = (changes.get("title") or "").strip()
+    if "level" in changes:
+        fields[GoalFields.LEVEL] = changes.get("level") or ""
+    if "status" in changes:
+        fields[GoalFields.STATUS] = changes.get("status") or ""
+    if "start_at" in changes:
+        start = changes.get("start_at")
+        fields[GoalFields.START_AT] = _ms(start) if isinstance(start, datetime) else None
+    if "end_at" in changes:
+        end = changes.get("end_at")
+        fields[GoalFields.END_AT] = _ms(end) if isinstance(end, datetime) else None
+    if "description" in changes:
+        fields[GoalFields.DESCRIPTION] = changes.get("description") or ""
+    if "key_results" in changes:
+        fields[GoalFields.KEY_RESULTS] = changes.get("key_results") or ""
+    if "progress" in changes:
+        fields[GoalFields.PROGRESS] = int(changes.get("progress") or 0)
+    return fields
+
+
+def compute_goal_progresses(tasks: list[Task]) -> dict[str, int]:
+    """按任务的「所属目标」聚合计算每个目标的进度百分比（0~100）。
+
+    进度 = 该目标下已结束任务数 / 全部任务数（无任务则为 0）。
+    主线程在每轮同步后调用，把结果与目标当前进度比对，变化才写回。
+    """
+    grouped: dict[str, list[Task]] = {}
+    for task in tasks:
+        if task.goal_record_id:
+            grouped.setdefault(task.goal_record_id, []).append(task)
+    return {goal_id: _progress_percent(owned) for goal_id, owned in grouped.items()}
+
+
 # ----------------------------------------------------------------------
 # 娱乐监控日志表写入（M4）
 # ----------------------------------------------------------------------
